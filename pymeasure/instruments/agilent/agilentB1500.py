@@ -1247,6 +1247,31 @@ class SMU:
             self.write("RM %d, %d, %d" % (self.channel, mode, rate))
         self.write
 
+    def meas_current(self, range=""):
+        """Performs high speed spot current measurement (``TI``).
+        Returns measurement data regardless of SMU operation mode,
+        trigger mode, and measurement mode.
+
+        :param range: Measurement range or ranging type, defaults to auto
+        :type range: int or str, optional
+        :return: Formatted measurement data
+        :rtype: tuple
+        """
+        cmd = "TI %d" % self.channel
+        if range != "":
+            range_index = self.current_ranging.meas(range).index
+            cmd += ", %d" % range_index
+
+        self.write(cmd)
+        self.check_errors()
+
+        data = self._b1500.read_bytes(self._b1500._data_format.size)
+        data = data.decode("ASCII")
+        data = data.rstrip("\r,")
+
+        formatted_data = self._b1500._data_format.format_single(data)
+        return formatted_data
+
     ######################################
     # Staircase Sweep Measurement: (WT, WM -> Instrument)
     # implemented:
