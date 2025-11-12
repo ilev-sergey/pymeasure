@@ -57,6 +57,7 @@ class AgilentB1500(SCPIMixin, Instrument):
     def __init__(self, adapter, name="Agilent B1500 Semiconductor Parameter Analyzer", **kwargs):
         super().__init__(adapter, name, read_termination="\r\n", write_termination="\r\n", **kwargs)
         self._smu_names = {}
+        self._smu_references = {}
 
     @property
     def smu_references(self):
@@ -137,6 +138,7 @@ class AgilentB1500(SCPIMixin, Instrument):
                     name=f"SMU{i}",
                     channel=channel,
                 )
+                self._smu_references[channel] = self.smus[i]
                 self._smu_names[channel] = self.smus[i].name
                 i += 1
 
@@ -938,7 +940,7 @@ class SMU(Channel):
 
     def query_learn(self, query_type, command):
         """Wrap :meth:`~.AgilentB1500.query_learn` method of B1500."""
-        response = self.parent.query_learn(query_type)
+        response = self._b1500.query_learn(query_type)
         # query_learn returns settings of all smus
         # pick setting for this smu only
         response = response[command + str(self.channel)]
@@ -946,17 +948,17 @@ class SMU(Channel):
 
     def check_errors(self):
         """Wrap :meth:`~.AgilentB1500.check_errors` method of B1500."""
-        return self.parent.check_errors()
+        return self._b1500.check_errors()
 
     ##########################################
 
     def _query_status_raw(self):
-        return self.parent.query_learn(str(self.channel))
+        return self._b1500.query_learn(str(self.channel))
 
     @property
     def status(self):
         """Query status of the SMU."""
-        return self.parent.query_learn_header(str(self.channel))
+        return self._b1500.query_learn_header(str(self.channel))
 
     def enable(self):
         """Enable Source/Measurement Channel (``CN``)"""
@@ -985,7 +987,7 @@ class SMU(Channel):
         """
         # different than other SMU specific settings (grouped by setting)
         # read via raw command
-        response = self.parent.query_learn(30)
+        response = self._b1500.query_learn(30)
         if "FL" in response.keys():
             # only present if filters of all channels are off
             return False
