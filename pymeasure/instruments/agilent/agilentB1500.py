@@ -57,12 +57,11 @@ class AgilentB1500(SCPIMixin, Instrument):
     def __init__(self, adapter, name="Agilent B1500 Semiconductor Parameter Analyzer", **kwargs):
         super().__init__(adapter, name, read_termination="\r\n", write_termination="\r\n", **kwargs)
         self._smu_names = {}
-        self._smu_references = {}
 
     @property
     def smu_references(self):
         """Return all SMU instances."""
-        return self._smu_references.values()
+        return self.smus.values()
 
     @property
     def smu_names(self):
@@ -138,6 +137,7 @@ class AgilentB1500(SCPIMixin, Instrument):
                     name=f"SMU{i}",
                     channel=channel,
                 )
+                self._smu_names[channel] = self.smus[i].name
                 i += 1
 
     def initialize_all_spgus(self):
