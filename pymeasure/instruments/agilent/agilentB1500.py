@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import re
+import struct
 import time
 import weakref
 from collections import Counter, OrderedDict, namedtuple
@@ -1561,6 +1562,134 @@ class SMUCurrentRanging:
 ######################################
 
 
+class ALWGPattern:
+    """Waveform pattern for SPGU ALWG (Arbitrary Linear Waveform Generator) mode.
+
+    Represents a single waveform pattern as a series of linear voltage segments.
+    The waveform starts at *initial_voltage* and transitions linearly to each
+    voltage in *voltages* over the corresponding *times*.
+
+    :param float initial_voltage: Initial output voltage in V.
+    :param list[float] voltages: Target voltage at the end of each segment in V.
+        Range: -40 V to +40 V.
+    :param list[float] times: Duration of each segment in seconds.
+        Range: 10 ns to 671.088630 ms, resolution 10 ns.
+    :param list[bool] switch_states: Pulse switch state for each segment
+        (True = closed, False = open). Defaults to False (open) for all segments.
+
+    Example usage::
+
+        pattern = ALWGPattern(
+            initial_voltage=0.0,
+            voltages=[1.0, 1.0, 0.0],
+            times=[100e-9, 500e-9, 100e-9],
+        )
+    """
+
+    _VOLTAGE_RESOLUTION = 1e-6  # 1 μV/count
+    _TIME_RESOLUTION = 1e-9  # 1 nsec/count
+    _TIME_MIN_NS = 10  # minimum 10 nsec
+    _TIME_MAX_NS = (2**26 - 1) * 10  # 671,088,630 nsec
+
+    def __init__(self, initial_voltage, voltages, times, switch_states=None):
+        if len(voltages) != len(times):
+            raise ValueError("voltages and times must have the same length")
+        if switch_states is None:
+            switch_states = [False] * len(voltages)
+        if len(switch_states) != len(voltages):
+            raise ValueError("switch_states must have the same length as voltages")
+        self.initial_voltage = initial_voltage
+        self.voltages = list(voltages)
+        self.times = list(times)
+        self.switch_states = list(switch_states)
+
+    def __len__(self):
+        return len(self.voltages)
+
+    def __repr__(self):
+        return f"ALWGPattern(initial_voltage={self.initial_voltage}, n_vectors={len(self)})"
+
+
+def _encode_alwg_pattern_data(patterns):
+    """Encode a list of ALWGPattern objects to binary bytes for the ``ALW`` command.
+
+    Binary format is big-endian as defined in Table 2-4 of the B1500 Programmer's Guide.
+
+    :param list[ALWGPattern] patterns: Waveform patterns to encode (1 to 512).
+        Total number of vectors across all patterns must be ≤ 1024 - len(patterns).
+    :return: Binary payload bytes.
+    :rtype: bytes
+    """
+    num_patterns = len(patterns)
+    if not 1 <= num_patterns <= 512:
+        raise ValueError(f"Number of patterns must be 1 to 512, got {num_patterns}")
+    total_vectors = sum(len(p) for p in patterns)
+    if total_vectors > 1024 - num_patterns:
+        raise ValueError(
+            f"Total number of vectors ({total_vectors}) exceeds the limit of "
+            f"{1024 - num_patterns} (1024 - {num_patterns} patterns)"
+        )
+
+    # Header: 20 bytes (module type=0, revision=0, num_patterns as uint16, 16 zero bytes)
+    data = bytes([0, 0]) + struct.pack(">H", num_patterns) + bytes(16)
+
+    for pattern in patterns:
+        N_i = len(pattern)
+        initial_counts = round(pattern.initial_voltage / ALWGPattern._VOLTAGE_RESOLUTION)
+        # Initial data: 6 bytes (N_i: 2B unsigned short, initial_voltage: 4B signed int)
+        data += struct.pack(">Hi", N_i, initial_counts)
+
+        for voltage, time_s, switch in zip(
+            pattern.voltages, pattern.times, pattern.switch_states
+        ):
+            voltage_counts = round(voltage / ALWGPattern._VOLTAGE_RESOLUTION)
+            time_ns = round(time_s / ALWGPattern._TIME_RESOLUTION)
+            if not ALWGPattern._TIME_MIN_NS <= time_ns <= ALWGPattern._TIME_MAX_NS:
+                raise ValueError(
+                    f"Time {time_s * 1e9:.1f} ns is out of range "
+                    f"[{ALWGPattern._TIME_MIN_NS}, {ALWGPattern._TIME_MAX_NS}] ns"
+                )
+            if time_ns % 10 != 0:
+                raise ValueError(
+                    f"Time {time_s * 1e9:.1f} ns must be a multiple of 10 ns"
+                )
+            # Vector data: 8 bytes
+            # Bytes 0-3: output level (signed int, 1 μV/count)
+            # Bytes 4-7: MSB = pulse switch (1=close), lower 31 bits = time (nsec)
+            switch_and_time = (int(switch) << 31) | (time_ns & 0x7FFFFFFF)
+            data += struct.pack(">iI", voltage_counts, switch_and_time)
+
+    return data
+
+
+def _encode_alwg_sequence_data(pattern_cycles):
+    """Encode sequence data to binary bytes for the ``ALS`` command.
+
+    Binary format is big-endian as defined in Table 2-5 of the B1500 Programmer's Guide.
+
+    :param list[tuple[int, int]] pattern_cycles: List of ``(pattern_index, repeat_count)``
+        tuples. *pattern_index* is 0-based. *repeat_count* is 1 to 1,048,576.
+    :return: Binary payload bytes.
+    :rtype: bytes
+    """
+    num_cycles = len(pattern_cycles)
+    if not 1 <= num_cycles <= 512:
+        raise ValueError(f"Number of pattern cycles must be 1 to 512, got {num_cycles}")
+
+    # Header: 20 bytes (module type=0, revision=0, num_cycles as uint16, 16 zero bytes)
+    data = bytes([0, 0]) + struct.pack(">H", num_cycles) + bytes(16)
+
+    for pattern_index, repeat_count in pattern_cycles:
+        if not 1 <= repeat_count <= 1_048_576:
+            raise ValueError(
+                f"repeat_count must be 1 to 1,048,576, got {repeat_count}"
+            )
+        # 6 bytes: pattern_index (2B unsigned short) + repeat_count (4B unsigned int)
+        data += struct.pack(">HI", pattern_index, repeat_count)
+
+    return data
+
+
 class SPGU(Channel):
     """Provide specific methods for the SPGU module of the Agilent B1500 mainframe.
 
@@ -1649,6 +1778,28 @@ class SPGU(Channel):
         """Get whether the SPGU output has finished. (``SPST?``)""",
         get_process=lambda v: not bool(v),
     )
+
+    def set_alwg_sequence(self, pattern_cycles):
+        """Set the ALWG sequence data shared by all SPGU channels. (``ALS``)
+
+        The sequence data defines the order and repetition of waveform patterns.
+        It is common to all SPGU modules installed in the B1500.
+
+        Requires ALWG mode to be set first: ``SIM 1``
+        (:attr:`operation_mode` = :attr:`SPGUOperationMode.ALWG`).
+
+        :param list[tuple[int, int]] pattern_cycles: List of ``(pattern_index, repeat_count)``
+            tuples, where *pattern_index* is 0-based (referring to the order of patterns
+            passed to :meth:`SPGUChannel.set_alwg_pattern`) and *repeat_count* is
+            1 to 1,048,576.
+
+        Example::
+
+            spgu.set_alwg_sequence([(1, 2), (0, 3)])
+            # Output Pattern2 twice, then Pattern1 three times per sequence
+        """
+        data = _encode_alwg_sequence_data(pattern_cycles)
+        self.write_bytes(f"ALS {len(data)}\n".encode() + data)
 
 
 class SPGUChannel(Channel):
@@ -1755,6 +1906,62 @@ class SPGUChannel(Channel):
         * ALWG mode: output initial value of waveform
         """
         self.write(f"SPUPD {self.id}")
+
+    def set_alwg_pattern(self, patterns):
+        """Set ALWG waveform pattern data for this channel. (``ALW``)
+
+        Requires ALWG mode to be set first: ``SIM 1``
+        (:attr:`SPGU.operation_mode` = :attr:`SPGUOperationMode.ALWG`).
+
+        After setting the pattern data and sequence data (:meth:`SPGU.set_alwg_sequence`),
+        call :meth:`apply_setup` to apply the configuration and then set
+        :attr:`SPGU.output` to ``True`` to start output.
+
+        :param list[ALWGPattern] patterns: Waveform patterns (1 to 512).
+            Total number of vectors across all patterns must be ≤ 1024 - len(patterns).
+
+        Example::
+
+            p1 = ALWGPattern(0.0, [1.0, 1.0, 0.0], [100e-9, 500e-9, 100e-9])
+            p2 = ALWGPattern(0.0, [2.0, 2.0, 0.0], [100e-9, 200e-9, 100e-9])
+            spgu.ch1.set_alwg_pattern([p1, p2])
+        """
+        data = _encode_alwg_pattern_data(patterns)
+        self.write_bytes(f"ALW {self.id}, {len(data)}\n".encode() + data)
+
+    trigger_output = Channel.setting(
+        "STGP {ch}, %d",
+        """Set trigger output timing for ALWG mode. (``STGP``)
+
+        Applies commonly to all channels in the same SPGU module.
+
+        * 0: trigger output disabled (default)
+        * 1: trigger at ALWG sequence start (or synchronized to pulses in PG mode)
+        * 2: trigger at ALWG pattern change or start of the first pattern
+        * 3: trigger at the start of every ALWG pattern
+        """,
+        validator=strict_discrete_set,
+        values=[0, 1, 2, 3],
+    )
+
+    def set_pulse_switch(self, state, normal=0, delay=None, width=None):
+        """Configure the pulse switch for this SPGU channel. (``ODSW``)
+
+        :param int state: Pulse switch state: 0 = disabled (default), 1 = enabled.
+        :param int normal: Normal state of the switch: 0 = normally open (default),
+            1 = normally closed.
+        :param float or None delay: PG mode only. Delay in seconds from start of pulse
+            output to switch changeover (0 to period − 100 ns, resolution 10 ns).
+            Ignored in ALWG mode.
+        :param float or None width: PG mode only. Duration in seconds to hold the switched
+            state (100 ns to period − delay, resolution 10 ns). Ignored in ALWG mode.
+        """
+        state = strict_discrete_set(state, [0, 1])
+        normal = strict_discrete_set(normal, [0, 1])
+        cmd = f"ODSW {self.id}, {state}, {normal}"
+        if delay is not None and width is not None:
+            cmd += f", {delay}, {width}"
+        self.write(cmd)
 
 
 class CMU(Channel):

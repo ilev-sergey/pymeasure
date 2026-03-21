@@ -34,7 +34,7 @@ from .agilent4294A import Agilent4294A
 from .agilent33220A import Agilent33220A
 from .agilent33500 import Agilent33500
 from .agilent33521A import Agilent33521A
-from .agilentB1500 import AgilentB1500
+from .agilentB1500 import AgilentB1500, ALWGPattern
 from .agilent4284A import Agilent4284A
 from .agilentB298x import (AgilentB2981,
                            AgilentB2983,
