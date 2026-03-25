@@ -103,6 +103,85 @@ class TestSMU:
         ) as inst:
             inst.smu1.disable()
 
+    def test_multi_channel_sweep_source_voltage(self):
+        """Test multi_channel_sweep_source for voltage sweep (WNX)."""
+        with expected_protocol(
+            AgilentB1500Mock,
+            [("WNX 2, 1, 1, 12, 0, 3, 0.001", None), ("ERRX?", '0,"No Error"')],
+        ) as inst:
+            inst.smu1.multi_channel_sweep_source(
+                n=2,
+                source_type="Voltage",
+                source_range=12,
+                start=0,
+                stop=3,
+                comp=0.001,
+            )
+
+    def test_multi_channel_sweep_source_current(self):
+        """Test multi_channel_sweep_source for current sweep (WNX)."""
+        with expected_protocol(
+            AgilentB1500Mock,
+            [("WNX 3, 1, 2, 0, 0.001, 0.01, 3", None), ("ERRX?", '0,"No Error"')],
+        ) as inst:
+            inst.smu1.multi_channel_sweep_source(
+                n=3,
+                source_type="Current",
+                source_range=0,
+                start=0.001,
+                stop=0.01,
+                comp=3,
+            )
+
+    def test_multi_channel_sweep_source_with_pcomp(self):
+        """Test multi_channel_sweep_source with power compliance (WNX)."""
+        with expected_protocol(
+            AgilentB1500Mock,
+            [("WNX 2, 1, 1, 12, 0, 3, 0.001, 0.002", None), ("ERRX?", '0,"No Error"')],
+        ) as inst:
+            inst.smu1.multi_channel_sweep_source(
+                n=2,
+                source_type="Voltage",
+                source_range=12,
+                start=0,
+                stop=3,
+                comp=0.001,
+                Pcomp=0.002,
+            )
+
+    def test_multi_channel_sweep_source_constant(self):
+        """Test multi_channel_sweep_source as constant bias (start == stop)."""
+        with expected_protocol(
+            AgilentB1500Mock,
+            [("WNX 2, 1, 1, 12, 0.1, 0.1, 0.001", None), ("ERRX?", '0,"No Error"')],
+        ) as inst:
+            inst.smu1.multi_channel_sweep_source(
+                n=2,
+                source_type="Voltage",
+                source_range=12,
+                start=0.1,
+                stop=0.1,
+                comp=0.001,
+            )
+
+    def test_multi_channel_sweep_source_invalid_n(self):
+        """Test that n outside 2-10 raises ValueError."""
+        with expected_protocol(AgilentB1500Mock, []) as inst:
+            with pytest.raises(ValueError):
+                inst.smu1.multi_channel_sweep_source(
+                    n=1, source_type="Voltage", source_range=12,
+                    start=0, stop=3, comp=0.001,
+                )
+
+    def test_multi_channel_sweep_source_invalid_type(self):
+        """Test that invalid source_type raises ValueError."""
+        with expected_protocol(AgilentB1500Mock, []) as inst:
+            with pytest.raises(ValueError):
+                inst.smu1.multi_channel_sweep_source(
+                    n=2, source_type="Power", source_range=12,
+                    start=0, stop=3, comp=0.001,
+                )
+
 
 class TestSPGU:
     """Tests for SPGU module functionality."""

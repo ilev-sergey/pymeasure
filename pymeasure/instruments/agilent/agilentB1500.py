@@ -1260,6 +1260,7 @@ class SMU(Channel):
         self.check_errors()
 
     # Synchronous Output: WSI, WSV, BSSI, BSSV, LSSI, LSSV
+    # Multi-channel synchronous output: WNX
 
     def synchronous_sweep_source(self, source_type, source_range, start, stop, comp, Pcomp=""):
         """Specify synchronous staircase sweep source (current or voltage)
@@ -1282,6 +1283,44 @@ class SMU(Channel):
             raise ValueError("Source Type must be Current or Voltage.")
         # check on comp value not yet implemented
         cmd += f"{self.id}, {source_range}, {start}, {stop}, {comp}"
+        if not Pcomp == "":
+            cmd += f", {Pcomp}"
+        self.write(cmd)
+        self.check_errors()
+
+    def multi_channel_sweep_source(
+        self, n, source_type, source_range, start, stop, comp, Pcomp=""
+    ):
+        """Specify a multi-channel staircase sweep source synchronized with the
+        primary sweep source. (``WNX``)
+
+        Used in multi-channel sweep measurement (:attr:`MeasMode.STAIRCASE_SWEEP`, MM16).
+        The primary sweep source must be set first with :meth:`staircase_sweep_source`.
+        All synchronous sources step in lock-step with the primary sweep.
+        Setting ``start == stop`` configures the source as a constant bias.
+
+        This setting is cleared by :meth:`staircase_sweep_source` or ``WNCC``.
+
+        :param int n: Source number (2 to 10). Each call must use a unique N value.
+        :param str source_type: Source type (``'Voltage'`` or ``'Current'``)
+        :param int source_range: Source range index. See Table 4-4 (voltage) or
+            Table 4-5 (current) in the B1500 programming guide.
+        :param float start: Sweep start value in V or A.
+        :param float stop: Sweep stop value in V or A.
+        :param float comp: Compliance value in A or V.
+        :param float Pcomp: Power compliance in W, defaults to not set.
+            Not available for HVSMU.
+        """
+        n = strict_range(n, range(2, 11))
+        if source_type.upper() == "VOLTAGE":
+            mode = 1
+            source_range = self.voltage_ranging.output(source_range).index
+        elif source_type.upper() == "CURRENT":
+            mode = 2
+            source_range = self.current_ranging.output(source_range).index
+        else:
+            raise ValueError("Source Type must be Current or Voltage.")
+        cmd = f"WNX {n}, {self.id}, {mode}, {source_range}, {start}, {stop}, {comp}"
         if not Pcomp == "":
             cmd += f", {Pcomp}"
         self.write(cmd)
