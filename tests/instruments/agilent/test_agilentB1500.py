@@ -1,7 +1,7 @@
 #
 # This file is part of the PyMeasure package.
 #
-# Copyright (c) 2013-2025 PyMeasure Developers
+# Copyright (c) 2013-2026 PyMeasure Developers
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -22,17 +22,26 @@
 # THE SOFTWARE.
 #
 
+import struct
+
 import pytest
 
-from pymeasure.instruments.agilent import AgilentB1500
+from pymeasure.instruments.agilent import AgilentB1500, ALWGPattern
 from pymeasure.instruments.agilent.agilentB1500 import (
+    CMU,
+    SMU,
     SPGU,
     ControlMode,
+    MFCMUMeasurementMode,
     PgSelectorConnectionStatus,
     PgSelectorPort,
+    SCUUPath,
     SPGUChannelOutputMode,
     SPGUOperationMode,
     SPGUOutputMode,
+    SweepMode,
+    _encode_alwg_pattern_data,
+    _encode_alwg_sequence_data,
 )
 from pymeasure.test import expected_protocol
 
@@ -73,6 +82,30 @@ class AgilentB1500Mock(AgilentB1500):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.spgu1 = SPGU(self, 1)
+        self.cmu = CMU(self, 2)
+        self.smu1 = SMU(self, index=1, smu_type="HRSMU", name="test", slot=1)
+
+
+class TestSMU:
+    """Tests for SMU module functionality."""
+
+    channel = 1
+
+    def test_enable(self):
+        """Test enable method."""
+        with expected_protocol(
+            AgilentB1500Mock,
+            [(f"CN {self.channel}", None)],
+        ) as inst:
+            inst.smu1.enable()
+
+    def test_disable(self):
+        """Test disable method."""
+        with expected_protocol(
+            AgilentB1500Mock,
+            [(f"CL {self.channel}", None)],
+        ) as inst:
+            inst.smu1.disable()
 
 
 class TestSPGU:
@@ -207,3 +240,222 @@ class TestSPGUChannel:
             [(f"SPUPD {self.channel}", None)],
         ) as inst:
             inst.spgu1.ch1.apply_setup()
+
+
+class TestCMU:
+    """Tests for CMU module functionality."""
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_enabled(self, enabled):
+        """Test enabled property."""
+        expected_command = "CN" if enabled else "CL"
+        with expected_protocol(
+            AgilentB1500Mock,
+            [(f"{expected_command} 2", None)],
+        ) as inst:
+            inst.cmu.enabled = enabled
+
+    @pytest.mark.parametrize("voltage", [0.0, 0.25])
+    def test_voltage_ac(self, voltage):
+        """Test voltage_ac setting with boundary values."""
+        with expected_protocol(
+            AgilentB1500Mock,
+            [(f"ACV 2, {voltage:f}", None)],
+        ) as inst:
+            inst.cmu.voltage_ac = voltage
+
+    @pytest.mark.parametrize("frequency", [1e3, 5e6])
+    def test_frequency_ac(self, frequency):
+        """Test frequency_ac setting with boundary values."""
+        with expected_protocol(
+            AgilentB1500Mock,
+            [(f"FC 2, {frequency:f}", None)],
+        ) as inst:
+            inst.cmu.frequency_ac = frequency
+
+    @pytest.mark.parametrize("measurement_mode", list(MFCMUMeasurementMode))
+    def test_set_measurement_mode(self, measurement_mode):
+        """Test set_measurement_mode method."""
+        with expected_protocol(
+            AgilentB1500Mock,
+            [(f"IMP {measurement_mode.value}", None)],
+        ) as inst:
+            inst.cmu.set_measurement_mode(measurement_mode)
+
+    def test_set_cv_timings(self):
+        """Test set_cv_timings method."""
+        with expected_protocol(
+            AgilentB1500Mock,
+            [("WTDCV 2, 0.5, 0.1, 0.0, 0.0", None)],
+        ) as inst:
+            inst.cmu.set_cv_timings(hold_time=0.5, delay_time=0.1)
+
+    def test_set_cv_timings_all_params(self):
+        """Test set_cv_timings with all parameters."""
+        with expected_protocol(
+            AgilentB1500Mock,
+            [("WTDCV 2, 1.0, 0.5, 0.2, 0.1", None)],
+        ) as inst:
+            inst.cmu.set_cv_timings(
+                hold_time=1.0,
+                delay_time=0.5,
+                step_delay_time=0.2,
+                step_source_trigger_delay_time=0.1,
+            )
+
+    @pytest.mark.parametrize("mode", [SweepMode.LINEAR_SINGLE, SweepMode.LINEAR_DOUBLE])
+    def test_set_cv_parameters(self, mode):
+        """Test set_cv_parameters method."""
+        with expected_protocol(
+            AgilentB1500Mock,
+            [(f"WDCV 2, {mode.value}, -5, 5, 100", None)],
+        ) as inst:
+            inst.cmu.set_cv_parameters(mode=mode, start=-5, stop=5, steps=100)
+
+    def test_force_dc_bias(self):
+        """Test force_dc_bias method."""
+        with expected_protocol(
+            AgilentB1500Mock,
+            [("DCV 2, 1.5", None)],
+        ) as inst:
+            inst.cmu.force_dc_bias(1.5)
+
+    @pytest.mark.parametrize("path", list(SCUUPath))
+    def test_set_scuu_path(self, path):
+        """Test set_scuu_path method."""
+        with expected_protocol(
+            AgilentB1500Mock,
+            [(f"SSP 2, {path.value}", None)],
+        ) as inst:
+            inst.cmu.set_scuu_path(path)
+
+    def test_set_alwg_pattern(self):
+        """Test set_alwg_pattern sends correct ALW binary data."""
+        pattern = ALWGPattern(
+            initial_voltage=0.0,
+            voltages=[1.0, 0.0],
+            times=[100e-9, 100e-9],
+        )
+        data = _encode_alwg_pattern_data([pattern])
+        expected = f"ALW {self.id}, {len(data)}\n".encode() + data
+        with expected_protocol(
+            AgilentB1500Mock,
+            [(expected, None)],
+        ) as inst:
+            inst.spgu1.ch1.set_alwg_pattern([pattern])
+
+    @pytest.mark.parametrize("state", [0, 1, 2, 3])
+    def test_trigger_output(self, state):
+        """Test trigger_output setting."""
+        with expected_protocol(
+            AgilentB1500Mock,
+            [(f"STGP {self.id}, {state}", None)],
+        ) as inst:
+            inst.spgu1.ch1.trigger_output = state
+
+    def test_set_pulse_switch_basic(self):
+        """Test set_pulse_switch with state and normal only."""
+        with expected_protocol(
+            AgilentB1500Mock,
+            [(f"ODSW {self.id}, 1, 0", None)],
+        ) as inst:
+            inst.spgu1.ch1.set_pulse_switch(state=1, normal=0)
+
+    def test_set_pulse_switch_with_timing(self):
+        """Test set_pulse_switch with PG-mode delay and width."""
+        with expected_protocol(
+            AgilentB1500Mock,
+            [(f"ODSW {self.id}, 1, 1, 1e-06, 2e-06", None)],
+        ) as inst:
+            inst.spgu1.ch1.set_pulse_switch(state=1, normal=1, delay=1e-6, width=2e-6)
+
+
+class TestSPGUALWG:
+    """Tests for SPGU ALWG functionality."""
+
+    def test_alwg_pattern_data_encoding(self):
+        """Test binary encoding of ALWGPattern data matches expected format."""
+        pattern = ALWGPattern(
+            initial_voltage=0.0,
+            voltages=[1.0],
+            times=[100e-9],
+            switch_states=[False],
+        )
+        data = _encode_alwg_pattern_data([pattern])
+
+        # Header: 20 bytes
+        assert data[:2] == bytes([0, 0])
+        assert struct.unpack(">H", data[2:4])[0] == 1  # num_patterns = 1
+        assert data[4:20] == bytes(16)  # reserved zeros
+
+        # Initial data: N_i=1 (2B), initial_voltage=0 (4B)
+        assert struct.unpack(">H", data[20:22])[0] == 1
+        assert struct.unpack(">i", data[22:26])[0] == 0
+
+        # Vector: voltage=1V → 1_000_000 counts, time=100ns → 100 counts, switch=off
+        assert struct.unpack(">i", data[26:30])[0] == 1_000_000
+        switch_and_time = struct.unpack(">I", data[30:34])[0]
+        assert switch_and_time >> 31 == 0  # switch open
+        assert switch_and_time & 0x7FFFFFFF == 100  # 100 ns
+
+        assert len(data) == 20 + 6 + 8  # header + initial + 1 vector
+
+    def test_alwg_pattern_switch_close(self):
+        """Test that switch=True sets the MSB in the time field."""
+        pattern = ALWGPattern(0.0, [0.0], [10e-9], switch_states=[True])
+        data = _encode_alwg_pattern_data([pattern])
+        switch_and_time = struct.unpack(">I", data[30:34])[0]
+        assert switch_and_time >> 31 == 1  # switch closed
+
+    def test_alwg_sequence_data_encoding(self):
+        """Test binary encoding of ALWG sequence data."""
+        data = _encode_alwg_sequence_data([(2, 2), (1, 3)])
+
+        # Header
+        assert data[:2] == bytes([0, 0])
+        assert struct.unpack(">H", data[2:4])[0] == 2  # num_cycles = 2
+        assert data[4:20] == bytes(16)
+
+        # Cycle 1: pattern 2, repeat 2
+        assert struct.unpack(">H", data[20:22])[0] == 2
+        assert struct.unpack(">I", data[22:26])[0] == 2
+
+        # Cycle 2: pattern 1, repeat 3
+        assert struct.unpack(">H", data[26:28])[0] == 1
+        assert struct.unpack(">I", data[28:32])[0] == 3
+
+        assert len(data) == 20 + 6 * 2
+
+    def test_set_alwg_sequence(self):
+        """Test set_alwg_sequence sends correct ALS binary data."""
+        pattern_cycles = [(2, 2), (1, 3)]
+        data = _encode_alwg_sequence_data(pattern_cycles)
+        expected = f"ALS {len(data)}\n".encode() + data
+        with expected_protocol(
+            AgilentB1500Mock,
+            [(expected, None)],
+        ) as inst:
+            inst.spgu1.set_alwg_sequence(pattern_cycles)
+
+    def test_alwg_pattern_too_many_patterns(self):
+        """Test that > 512 patterns raises ValueError."""
+        patterns = [ALWGPattern(0.0, [0.0], [10e-9]) for _ in range(513)]
+        with pytest.raises(ValueError, match="512"):
+            _encode_alwg_pattern_data(patterns)
+
+    def test_alwg_pattern_time_too_short(self):
+        """Test that time < 10 ns raises ValueError."""
+        pattern = ALWGPattern(0.0, [0.0], [5e-9])
+        with pytest.raises(ValueError, match="out of range"):
+            _encode_alwg_pattern_data([pattern])
+
+    def test_alwg_pattern_time_not_multiple_of_10ns(self):
+        """Test that time not a multiple of 10 ns raises ValueError."""
+        pattern = ALWGPattern(0.0, [0.0], [15e-9])
+        with pytest.raises(ValueError, match="multiple of 10 ns"):
+            _encode_alwg_pattern_data([pattern])
+
+    def test_alwg_sequence_invalid_repeat_count(self):
+        """Test that repeat_count > 1,048,576 raises ValueError."""
+        with pytest.raises(ValueError, match="repeat_count"):
+            _encode_alwg_sequence_data([(1, 1_048_577)])
