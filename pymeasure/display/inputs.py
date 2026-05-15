@@ -274,6 +274,15 @@ class ScientificInput(Input, QtWidgets.QDoubleSpinBox):
         else:
             return QtWidgets.QAbstractSpinBox.StepEnabledFlag.StepNone
 
+    def stepBy(self, steps):
+        if getattr(self._parameter, "step_type", "linear") == "log":
+            value = self.value()
+            if value == 0 or not self._parameter.step:
+                return
+            self.setValue(value * (self._parameter.step ** steps))
+        else:
+            super().stepBy(steps)
+
 
 class VectorInput(StringInput):
     """

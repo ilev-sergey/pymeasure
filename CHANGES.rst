@@ -12,6 +12,7 @@ Changed features
 ----------------
 - :code:`Instrument.control` does not apply :code:`get_process` to a returned list anymore, only to a single value. Use :code:`get_process_list` parameter instead for processing a list of values.
 - Improved implementation of Keithley 2400, with some changes in functionality. Legacy implementation has been kept as `Keithley2400Legacy`.
+- :code:`FloatParameter` accepts a new :code:`step_type` argument (:code:`"linear"` or :code:`"log"`). With :code:`step_type="log"`, the spinbox arrows multiply/divide the value by :code:`step` instead of adding/subtracting it, allowing decade-style stepping for parameters that span many orders of magnitude (e.g. pulse times).
 
 Deprecated
 ----------

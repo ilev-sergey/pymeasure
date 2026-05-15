@@ -25,12 +25,14 @@
 import numpy as np
 import pytest
 
-from pymeasure.experiment.parameters import Parameter
-from pymeasure.experiment.parameters import IntegerParameter
-from pymeasure.experiment.parameters import BooleanParameter
-from pymeasure.experiment.parameters import FloatParameter
-from pymeasure.experiment.parameters import ListParameter
-from pymeasure.experiment.parameters import VectorParameter
+from pymeasure.experiment.parameters import (
+    BooleanParameter,
+    FloatParameter,
+    IntegerParameter,
+    ListParameter,
+    Parameter,
+    VectorParameter,
+)
 
 
 def test_parameter_default():
@@ -137,6 +139,17 @@ def test_float_bounds():
         p.value = 10  # above maximum
     with pytest.raises(ValueError):
         p.value = -10  # below minimum
+
+
+def test_float_step_type_default_linear():
+    p = FloatParameter("Test")
+    assert p.step_type == "linear"
+
+
+def test_float_step_type_log():
+    p = FloatParameter("Test", step=10, step_type="log")
+    assert p.step_type == "log"
+    assert p.step == 10
 
 
 def test_list_string():

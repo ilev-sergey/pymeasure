@@ -253,16 +253,26 @@ class FloatParameter(Parameter):
     :param default: The default floating point value
     :param ui_class: A Qt class to use for the UI of this parameter
     :param step: step size for parameter's UI spinbox. If None, spinbox will have step disabled
+    :param step_type: how the spinbox arrows interpret :code:`step`. :code:`"linear"`
+        (default) adds/subtracts :code:`step`; :code:`"log"` multiplies/divides by
+        :code:`step` (e.g. :code:`step=10` gives decade steps). For :code:`"log"`,
+        the sign of the current value is preserved and a value of 0 is left
+        unchanged.
     """
 
     def __init__(self, name, units=None, minimum=-1e9, maximum=1e9,
-                 decimals=15, step=None, **kwargs):
+                 decimals=15, step=None, step_type="linear", **kwargs):
+        if step_type not in ("linear", "log"):
+            raise ValueError(
+                f"step_type must be 'linear' or 'log', got {step_type!r}"
+            )
         self.units = units
         self.minimum = minimum
         self.maximum = maximum
         super().__init__(name, **kwargs)
         self.decimals = decimals
         self.step = step
+        self.step_type = step_type
         self._help_fields.append(('decimals are', 'decimals'))
 
     def convert(self, value):

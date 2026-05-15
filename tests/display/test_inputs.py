@@ -242,6 +242,54 @@ class TestScientificInput:
             sci_input.parameter  # lazy update
             p.assert_called_once_with(5.0)
 
+    def test_linear_step_by_default(self, qtbot):
+        float_param = FloatParameter('potato',
+                                     minimum=-100, maximum=100,
+                                     default=1.0, step=0.5)
+        sci_input = ScientificInput(float_param)
+        qtbot.addWidget(sci_input)
+
+        sci_input.stepBy(1)
+        assert sci_input.value() == pytest.approx(1.5)
+        sci_input.stepBy(-2)
+        assert sci_input.value() == pytest.approx(0.5)
+
+    def test_log_step_multiplies_value(self, qtbot):
+        float_param = FloatParameter('potato',
+                                     minimum=1e-6, maximum=1e6,
+                                     default=1e-4, step=10, step_type="log")
+        sci_input = ScientificInput(float_param)
+        qtbot.addWidget(sci_input)
+
+        sci_input.stepBy(1)
+        assert sci_input.value() == pytest.approx(1e-3)
+        sci_input.stepBy(2)
+        assert sci_input.value() == pytest.approx(1e-1)
+        sci_input.stepBy(-3)
+        assert sci_input.value() == pytest.approx(1e-4)
+
+    def test_log_step_preserves_sign(self, qtbot):
+        float_param = FloatParameter('potato',
+                                     minimum=-100, maximum=100,
+                                     default=-0.5, step=10, step_type="log")
+        sci_input = ScientificInput(float_param)
+        qtbot.addWidget(sci_input)
+
+        sci_input.stepBy(1)
+        assert sci_input.value() == pytest.approx(-5.0)
+        sci_input.stepBy(-1)
+        assert sci_input.value() == pytest.approx(-0.5)
+
+    def test_log_step_no_op_at_zero(self, qtbot):
+        float_param = FloatParameter('potato',
+                                     minimum=-10, maximum=10,
+                                     default=0.0, step=10, step_type="log")
+        sci_input = ScientificInput(float_param)
+        qtbot.addWidget(sci_input)
+
+        sci_input.stepBy(1)
+        assert sci_input.value() == 0.0
+
     @pytest.mark.parametrize("locale, decimalSep", [
         [QtCore.QLocale(QtCore.QLocale.English,
                         QtCore.QLocale.LatinScript,
