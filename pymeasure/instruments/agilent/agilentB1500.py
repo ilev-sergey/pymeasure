@@ -79,14 +79,16 @@ class AgilentB1500(SCPIMixin, Instrument):
     def unit_names(self) -> dict[IdType, str]:
         """Get the channel number to unit name mapping for all initialized units.
 
-        Built from the :attr:`~SMU.name` of every initialized SMU, CMU and SPGU,
-        and used to label measurement data (see :meth:`read_data`).
+        Built from the uppercased pymeasure channel name (``_name``) of every
+        initialized SMU, CMU and SPGU.
         """
-        names: dict[IdType, str] = {smu.id: smu.name for smu in getattr(self, "smus", {}).values()}
-        names.update((spgu.id, spgu.name) for spgu in getattr(self, "spgus", {}).values())
+        names: dict[IdType, str] = {
+            smu.id: smu._name.upper() for smu in getattr(self, "smus", {}).values()
+        }
+        names.update((spgu.id, spgu._name.upper()) for spgu in getattr(self, "spgus", {}).values())
         cmu = getattr(self, "cmu", None)
         if isinstance(cmu, CMU):
-            names[cmu.id] = cmu.name
+            names[cmu.id] = cmu._name.upper()
         return names
 
     @property
@@ -165,7 +167,6 @@ class AgilentB1500(SCPIMixin, Instrument):
                     collection="smus",
                     prefix="smu",
                     smu_type=module_type,
-                    name=f"SMU{i}",
                     slot=channel,
                 )
                 self._smu_references[channel] = self.smus[i]
@@ -180,9 +181,7 @@ class AgilentB1500(SCPIMixin, Instrument):
         modules = self.query_modules()
         for channel, module_type in modules.items():
             if module_type == "SPGU":
-                self.add_child(
-                    SPGU, channel, collection="spgus", prefix="spgu", name=f"SPGU{channel}"
-                )
+                self.add_child(SPGU, channel, collection="spgus", prefix="spgu")
 
     def initialize_cmu(self) -> None:
         """Initialize CMU.
@@ -193,7 +192,7 @@ class AgilentB1500(SCPIMixin, Instrument):
         modules = self.query_modules()
         for channel, module_type in modules.items():
             if "CMU" in module_type:
-                self.add_child(CMU, id=channel, collection="cmu", prefix=None, name="CMU")
+                self.add_child(CMU, id=channel, collection="cmu", prefix=None)
 
     def pause(self, pause_seconds: int) -> None:
         """Pause command execution for given time in seconds. (``PA``)
@@ -1008,13 +1007,10 @@ class SMU(Channel):
     :param parent: Instance of the B1500 mainframe class
     :param index: Index of the SMU
     :param smu_type: Type of the SMU
-    :param name: Name of the SMU
     :param slot: Slot number of the SMU
     """
 
-    def __init__(
-        self, parent: AgilentB1500, index: int, smu_type: str, name: str, slot: int, **kwargs
-    ):
+    def __init__(self, parent: AgilentB1500, index: int, smu_type: str, slot: int, **kwargs):
         slot = strict_discrete_set(slot, range(1, 11))
         smu_type = strict_discrete_set(
             smu_type,
@@ -1035,8 +1031,12 @@ class SMU(Channel):
         self.channel = slot
         self.voltage_ranging = SMUVoltageRanging(smu_type)
         self.current_ranging = SMUCurrentRanging(smu_type)
-        self.name = name
         self.type = smu_type
+
+    @property
+    def name(self) -> str:
+        """Get the SMU name derived from the pymeasure channel name, e.g. ``SMU1``."""
+        return self._name.upper()
 
     ##########################################
     # Wrappers of B1500 communication methods
@@ -1788,9 +1788,8 @@ class SPGU(Channel):
     :param channel: Channel number of the SPGU
     """
 
-    def __init__(self, parent: AgilentB1500, channel: int, name: str, **kwargs):
+    def __init__(self, parent: AgilentB1500, channel: int, **kwargs):
         super().__init__(parent, channel, **kwargs)
-        self.name = name
         self.ch1 = self.add_child(SPGUChannel, int(f"{self.id}01"), prefix="ch")
         self.ch2 = self.add_child(SPGUChannel, int(f"{self.id}02"), prefix="ch")
 
@@ -1986,10 +1985,9 @@ class CMU(Channel):
     :param slot: Slot number of the CMU
     """
 
-    def __init__(self, parent: AgilentB1500, slot: int, name: str, **kwargs):
+    def __init__(self, parent: AgilentB1500, slot: int, **kwargs):
         slot = strict_discrete_set(slot, range(1, 11))
         super().__init__(parent, slot, **kwargs)
-        self.name = name
 
     enabled: InstrumentProperty[bool] = Channel.setting(
         "%s {ch}",

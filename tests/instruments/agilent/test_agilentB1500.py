@@ -83,9 +83,12 @@ class TestB1500:
 class AgilentB1500Mock(AgilentB1500):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.spgu1 = SPGU(self, 1, name="SPGU1")
-        self.cmu = CMU(self, 2, name="CMU")
-        self.smu1 = SMU(self, index=1, smu_type="HRSMU", name="test", slot=1)
+        self.spgu1 = SPGU(self, 1)
+        self.spgu1._name = "spgu1"
+        self.cmu = CMU(self, 2)
+        self.cmu._name = "cmu"
+        self.smu1 = SMU(self, index=1, smu_type="HRSMU", slot=1)
+        self.smu1._name = "smu1"
 
 
 class TestSMU:
