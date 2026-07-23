@@ -67,7 +67,6 @@ class AgilentB1500(SCPIMixin, Instrument):
         **kwargs,
     ):
         super().__init__(adapter, name, read_termination="\r\n", write_termination="\r\n", **kwargs)
-        self._smu_names: dict[int, str] = {}
         self._smu_references: dict[int, SMU] = {}
         self._data_format: AgilentB1500._data_formatting_generic | None = None
 
@@ -77,9 +76,28 @@ class AgilentB1500(SCPIMixin, Instrument):
         return self.smus.values()
 
     @property
-    def smu_names(self) -> dict[int, str]:
-        """Get all SMU names as dict."""
-        return self._smu_names
+    def unit_names(self) -> dict[IdType, str]:
+        """Get the channel number to unit name mapping for all initialized units.
+
+        Built from the uppercased pymeasure channel name (``_name``) of every
+        initialized SMU, CMU and SPGU.
+        """
+        names: dict[IdType, str] = {
+            smu.id: smu._name.upper() for smu in getattr(self, "smus", {}).values()
+        }
+        names.update((spgu.id, spgu._name.upper()) for spgu in getattr(self, "spgus", {}).values())
+        cmu = getattr(self, "cmu", None)
+        if isinstance(cmu, CMU):
+            names[cmu.id] = cmu._name.upper()
+        return names
+
+    @property
+    def smu_names(self) -> dict[IdType, str]:
+        """Get the channel number to SMU name mapping for all initialized SMUs.
+
+        SMU-only subset of :attr:`unit_names`.
+        """
+        return {channel: name for channel, name in self.unit_names.items() if "SMU" in name}
 
     def query_learn(self, query_type: int | str) -> dict[str, str | list[str]]:
         """Query settings from the instrument. (``*LRN?``)
@@ -149,11 +167,9 @@ class AgilentB1500(SCPIMixin, Instrument):
                     collection="smus",
                     prefix="smu",
                     smu_type=module_type,
-                    name=f"SMU{i}",
                     slot=channel,
                 )
                 self._smu_references[channel] = self.smus[i]
-                self._smu_names[channel] = self.smus[i].name
                 i += 1
 
     def initialize_all_spgus(self) -> None:
@@ -271,7 +287,7 @@ class AgilentB1500(SCPIMixin, Instrument):
         """Format data output head of measurement value into user-readable values.
 
         :param output_format_str: Format string of measurement value
-        :param smu_names: Dictionary of channel and SMU name
+        :param unit_names: Dictionary of channel and unit name
         """
 
         channels: dict[str, str | int] = {
@@ -351,7 +367,7 @@ class AgilentB1500(SCPIMixin, Instrument):
         }
         data_names_int = {"Sampling index"}  # convert to int instead of float
 
-        def __init__(self, smu_names: dict[int, str], output_format_str: str = ""):
+        def __init__(self, unit_names: dict[IdType, str], output_format_str: str = ""):
             """Store parameters of the chosen output format for later usage in data processing.
 
             Data Names: e.g. "Voltage (V)" or "Current Measurement (A)"
@@ -395,7 +411,7 @@ class AgilentB1500(SCPIMixin, Instrument):
                 self.data_names = {**data_names_G, **data_names_CG}
             else:
                 self.data_names = {}  # no header
-            self.smu_names = smu_names
+            self.unit_names = unit_names
 
         def check_status(
             self, status_string: str, name: str | None = None, cmu: bool = False
@@ -465,12 +481,12 @@ class AgilentB1500(SCPIMixin, Instrument):
             # subchannels not relevant for SMU/CMU
 
             try:
-                smu_name = self.smu_names[channel]
-                if "SMU" in smu_name:
-                    self.check_status(status_string, name=smu_name, cmu=False)
-                if "CMU" in smu_name:
-                    self.check_status(status_string, name=smu_name, cmu=True)
-                return smu_name
+                unit_name = self.unit_names[channel]
+                if "SMU" in unit_name:
+                    self.check_status(status_string, name=unit_name, cmu=False)
+                if "CMU" in unit_name:
+                    self.check_status(status_string, name=unit_name, cmu=True)
+                return unit_name
             except KeyError:
                 self.check_status(status_string)
                 return channel
@@ -488,8 +504,8 @@ class AgilentB1500(SCPIMixin, Instrument):
     class _data_formatting_FMT1(_data_formatting_generic):
         """Data formatting for FMT1 format."""
 
-        def __init__(self, smu_names: dict[int, str] = {}, output_format_string: str = "FMT1"):
-            super().__init__(smu_names, output_format_string)
+        def __init__(self, unit_names: dict[IdType, str] = {}, output_format_string: str = "FMT1"):
+            super().__init__(unit_names, output_format_string)
 
         def format_single(self, element: str) -> tuple[str, str | int, str, float]:
             """Format single measurement value.
@@ -512,14 +528,14 @@ class AgilentB1500(SCPIMixin, Instrument):
     class _data_formatting_FMT11(_data_formatting_FMT1):
         """Data formatting for FMT11 format (based on FMT1)."""
 
-        def __init__(self, smu_names: dict[int, str] = {}):
-            super().__init__(smu_names, "FMT11")
+        def __init__(self, unit_names: dict[IdType, str] = {}):
+            super().__init__(unit_names, "FMT11")
 
     class _data_formatting_FMT21(_data_formatting_generic):
         """Data formatting for FMT21 format."""
 
-        def __init__(self, smu_names: dict[int, str] = {}):
-            super().__init__(smu_names, "FMT21")
+        def __init__(self, unit_names: dict[IdType, str] = {}):
+            super().__init__(unit_names, "FMT21")
 
         def format_single(self, element: str) -> tuple[str, str | int, str, float]:
             """Format single measurement value.
@@ -540,12 +556,12 @@ class AgilentB1500(SCPIMixin, Instrument):
             return (status, channel, data_name, value)
 
     def _data_formatting(
-        self, output_format_str: str, smu_names: dict[int, str] = {}
+        self, output_format_str: str, unit_names: dict[IdType, str] = {}
     ) -> AgilentB1500._data_formatting_generic | None:
         """Return data formatting class for given data format string.
 
         :param output_format_str: Data output format, e.g. ``FMT21``
-        :param smu_names: Dictionary of channels and SMU names, defaults to {}
+        :param unit_names: Dictionary of channels and unit names, defaults to {}
         :return: Corresponding formatting class
         """
         classes: dict[str, type[AgilentB1500._data_formatting_generic]] = {
@@ -562,7 +578,7 @@ class AgilentB1500(SCPIMixin, Instrument):
             )
             return
         else:
-            return format_class(smu_names=smu_names)
+            return format_class(unit_names=unit_names)
 
     def data_format(self, output_format: int, mode: int = 0) -> None:
         """Specify data output format. Check documentation for parameters. (``FMT``)
@@ -581,19 +597,19 @@ class AgilentB1500(SCPIMixin, Instrument):
         mode = strict_range(mode, range(0, 11))
         self.write(f"FMT {output_format}, {mode}")
         self.check_errors()
-        if self._smu_names == {}:
+        if not self.unit_names:
             print(
-                "No SMU names available for formatting, "
+                "No unit names available for formatting, "
                 "instead channel numbers will be used. "
-                "Call data_format after initializing all SMUs."
+                "Call data_format after initializing all units."
             )
             log.info(
-                "No SMU names available for formatting, "
+                "No unit names available for formatting, "
                 "instead channel numbers will be used. "
-                "Call data_format after initializing all SMUs."
+                "Call data_format after initializing all units."
             )
         self._data_format: AgilentB1500._data_formatting_generic | None = self._data_formatting(
-            f"FMT{output_format}", self._smu_names
+            f"FMT{output_format}", self.unit_names
         )
 
     ######################################
@@ -997,13 +1013,10 @@ class SMU(Channel):
     :param parent: Instance of the B1500 mainframe class
     :param index: Index of the SMU
     :param smu_type: Type of the SMU
-    :param name: Name of the SMU
     :param slot: Slot number of the SMU
     """
 
-    def __init__(
-        self, parent: AgilentB1500, index: int, smu_type: str, name: str, slot: int, **kwargs
-    ):
+    def __init__(self, parent: AgilentB1500, index: int, smu_type: str, slot: int, **kwargs):
         slot = strict_discrete_set(slot, range(1, 11))
         smu_type = strict_discrete_set(
             smu_type,
@@ -1024,8 +1037,12 @@ class SMU(Channel):
         self.channel = slot
         self.voltage_ranging = SMUVoltageRanging(smu_type)
         self.current_ranging = SMUCurrentRanging(smu_type)
-        self.name = name
         self.type = smu_type
+
+    @property
+    def name(self) -> str:
+        """Get the SMU name derived from the pymeasure channel name, e.g. ``SMU1``."""
+        return self._name.upper()
 
     ##########################################
     # Wrappers of B1500 communication methods

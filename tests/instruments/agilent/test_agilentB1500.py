@@ -86,8 +86,11 @@ class AgilentB1500Mock(AgilentB1500):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.spgu1 = SPGU(self, 1)
+        self.spgu1._name = "spgu1"
         self.cmu = CMU(self, 2)
-        self.smu1 = SMU(self, index=1, smu_type="HRSMU", name="test", slot=1)
+        self.cmu._name = "cmu"
+        self.smu1 = SMU(self, index=1, smu_type="HRSMU", slot=1)
+        self.smu1._name = "smu1"
 
 
 class TestSMU:
@@ -423,6 +426,27 @@ class TestCMU:
         with expected_protocol(AgilentB1500Mock, []) as inst:
             with pytest.raises(ValueError):
                 inst.cmu.measure(meas_range=500)
+
+    def test_smu_names_excludes_cmu(self):
+        """Test that smu_names is the SMU-only subset of unit_names."""
+        with expected_protocol(AgilentB1500Mock, []) as inst:
+            assert inst.cmu.id in inst.unit_names
+            assert inst.cmu.id not in inst.smu_names
+
+    def test_read_data_cmu(self):
+        """Test read_data labels MFCMU data with the CMU unit name."""
+        with expected_protocol(
+            AgilentB1500Mock,
+            [
+                ("FMT 1, 0", None),
+                ("ERRX?", '+0,"No Error."'),
+                (None, "NBC+001.000E-12,NBY+002.000E-06"),
+            ],
+        ) as inst:
+            inst.data_format(1)
+            data = inst.read_data(1)
+            assert data.iloc[0]["CMU Capacitance (F)"] == 1e-12
+            assert data.iloc[0]["CMU Admittance (S)"] == 2e-6
 
     def test_set_cv_timings(self):
         """Test set_cv_timings method."""
