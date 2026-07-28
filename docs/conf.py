@@ -13,10 +13,11 @@
 
 import sys
 import os
+import typing
 
 sys.path.insert(0, os.path.abspath('..'))  # Allow modules to be found
 from pymeasure import __version__
-from pymeasure.instruments.common_base import CommonBase
+from pymeasure.instruments.common_base import CommonBase, InstrumentProperty
 from pymeasure.instruments.instrument import Instrument
 
 # Include Read the Docs formatting
@@ -278,6 +279,73 @@ typehints_defaults = "braces-after"
 
 def setup(app):
     app.connect('autodoc-process-docstring', gen_channel_docs)
+    app.connect('autodoc-process-bases', annotate_instrument_property_types)
+
+
+def _resolve_annotation(cls, name):
+    """Return the resolved annotation object for ``name`` from ``cls``' MRO.
+
+    Class annotations may be plain strings (``from __future__ import
+    annotations``); resolve just the one we need against the defining module's
+    globals so an unrelated unresolvable annotation cannot break the lookup.
+    """
+    for klass in getattr(cls, "__mro__", [cls]):
+        ann = getattr(klass, "__annotations__", {}).get(name)
+        if ann is None:
+            continue
+        if isinstance(ann, str):
+            module = sys.modules.get(klass.__module__)
+            globalns = getattr(module, "__dict__", {})
+            try:
+                ann = eval(ann, globalns, dict(vars(klass)))  # noqa: S307
+            except Exception:
+                return None
+        return ann
+    return None
+
+
+def _instrument_property_type(cls, name):
+    """Extract ``T`` from an ``InstrumentProperty[T]`` annotation, else None."""
+    ann = _resolve_annotation(cls, name)
+    if ann is None:
+        return None
+    origin = typing.get_origin(ann)
+    if isinstance(origin, type) and issubclass(origin, InstrumentProperty):
+        args = typing.get_args(ann)
+        if args:
+            return args[0]
+    return None
+
+
+def annotate_instrument_property_types(app, name, obj, options, bases):
+    """Document ``InstrumentProperty[T]`` value types instead of ``Any``.
+
+    Autodoc derives a property's documented type from its getter's return
+    annotation. Properties built by :meth:`Instrument.control` (and
+    ``measurement`` / ``setting``) use a generic getter annotated ``-> Any``,
+    so autodoc renders their type as ``Any`` even when the class attribute
+    carries an explicit ``InstrumentProperty[T]`` annotation for type checkers.
+
+    This fires on ``autodoc-process-bases`` for each documented class, before
+    its members' types are computed. Copy ``T`` onto each such getter's
+    ``return`` annotation across the class' MRO. Both autodoc pipelines (the
+    legacy class-based documenter in Sphinx <= 8 and the dynamic loader in
+    Sphinx >= 9) read that annotation, so this fixes the rendered type on either.
+    """
+    if not isinstance(obj, type):
+        return
+    for klass in obj.__mro__:
+        # snapshot the dict view: resolving an annotation can trigger a lazy
+        # import that mutates a ``__dict__`` mid-iteration.
+        for attr_name, attr in list(vars(klass).items()):
+            if not isinstance(attr, InstrumentProperty):
+                continue
+            fget = getattr(attr, "fget", None)
+            if fget is None:
+                continue
+            typ = _instrument_property_type(klass, attr_name)
+            if typ is not None:
+                fget.__annotations__["return"] = typ
 
 
 def get_class_name(cls):
