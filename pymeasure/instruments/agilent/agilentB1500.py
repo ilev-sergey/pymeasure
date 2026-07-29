@@ -369,13 +369,15 @@ class AgilentB1500(SCPIMixin, Instrument):
             128: "End of data",
         }
         data_names_int = {"Sampling index"}  # convert to int instead of float
+        #: Whether the measurement values are transferred as binary instead of ASCII
+        binary = False
 
         def __init__(self, unit_names: dict[int, str], output_format_str: str = ""):
             """Store parameters of the chosen output format for later usage in data processing.
 
             Data Names: e.g. "Voltage (V)" or "Current Measurement (A)"
             """
-            sizes = {"FMT1": 16, "FMT11": 17, "FMT21": 19}
+            sizes = {"FMT1": 16, "FMT11": 17, "FMT21": 19, "FMT14": 8}
             try:
                 self.size = sizes[output_format_str]
             except Exception as e:
@@ -449,10 +451,15 @@ class AgilentB1500(SCPIMixin, Instrument):
                     status_dict = self.cmu_status
                 else:
                     status_dict = self.smu_status
-                for index, digit in enumerate(f"{status:b}"):
-                    # [2:] to chop off 0b
+                # the status is the sum of the individual status values,
+                # so the binary digits have to be read starting at the least
+                # significant one to match them with the status values
+                for index, digit in enumerate(reversed(f"{status:b}")):
                     if digit == "1":
-                        log.info("Agilent B1500%s: %s", name, status_dict[2**index])
+                        try:
+                            log.info("Agilent B1500%s: %s", name, status_dict[2**index])
+                        except KeyError:
+                            log_failed()
             elif len(status.group("letter")) > 0:
                 status = status.group("letter")
                 status = status.strip()  # remove whitespaces
@@ -483,18 +490,28 @@ class AgilentB1500(SCPIMixin, Instrument):
             channel = int(str(channel)[0:-2])
             # subchannels not relevant for SMU/CMU
 
-            try:
-                unit_name = self.unit_names[channel]
-                if "SMU" in unit_name:
-                    self.check_status(status_string, name=unit_name, cmu=False)
-                if "CMU" in unit_name:
-                    self.check_status(status_string, name=unit_name, cmu=True)
-                return unit_name
-            except KeyError:
-                self.check_status(status_string)
-                return channel
+            return self.resolve_channel(channel, status_string)
 
-        def format_single(self, element: str) -> tuple[str, str | int, str, float]:
+        def resolve_channel(
+            self, channel: int, status_string: str, check_status: bool = True
+        ) -> str | int:
+            """Return the unit name of a channel number and optionally check its status.
+
+            :param channel: Channel (slot) number returned by the instrument
+            :param status_string: Status string returned by the instrument when reading data
+            :param check_status: Whether to check the status, defaults to True
+            :return: Unit name, or the channel number if no name is known
+            """
+            unit_name = self.unit_names.get(channel)
+            if unit_name is None:
+                if check_status:
+                    self.check_status(status_string)
+                return channel
+            if check_status and ("SMU" in unit_name or "CMU" in unit_name):
+                self.check_status(status_string, name=unit_name, cmu="CMU" in unit_name)
+            return unit_name
+
+        def format_single(self, element: str | bytes) -> tuple[str, str | int, str, float]:
             """Format a single measurement value.
 
             Implemented by the format-specific subclasses.
@@ -510,12 +527,13 @@ class AgilentB1500(SCPIMixin, Instrument):
         def __init__(self, unit_names: dict[int, str], output_format_string: str = "FMT1"):
             super().__init__(unit_names, output_format_string)
 
-        def format_single(self, element: str) -> tuple[str, str | int, str, float]:
+        def format_single(self, element: str | bytes) -> tuple[str, str | int, str, float]:
             """Format single measurement value.
 
             :param element: Single measurement value read from the instrument
             :return: Status, channel, data name, value
             """
+            element = cast(str, element)
             status = element[0]  # one character
             channel = element[1]
             data_name = element[2]
@@ -540,12 +558,13 @@ class AgilentB1500(SCPIMixin, Instrument):
         def __init__(self, unit_names: dict[int, str]):
             super().__init__(unit_names, "FMT21")
 
-        def format_single(self, element: str) -> tuple[str, str | int, str, float]:
+        def format_single(self, element: str | bytes) -> tuple[str, str | int, str, float]:
             """Format single measurement value.
 
             :param element: Single measurement value read from the instrument
             :return: Status (three digits), channel, data name, value
             """
+            element = cast(str, element)
             status = element[0:3]  # three digits
             channel = element[3]
             data_name = element[4]
@@ -557,6 +576,241 @@ class AgilentB1500(SCPIMixin, Instrument):
             channel = self.format_channel_check_status(status, channel)
 
             return (status, channel, data_name, value)
+
+    class _data_formatting_FMT14(_data_formatting_generic):
+        """Data formatting for the 8 byte binary FMT14 format.
+
+        Each measurement value is transferred as 8 bytes without any separator,
+        the response is terminated by ``EOI`` only.
+        """
+
+        binary = True
+
+        #: Parameter code (B) of the time data, which uses a different layout
+        TIME_PARAMETER = 3
+        #: Parameter code (B) of the sampling index, which is returned as data count
+        SAMPLING_INDEX_PARAMETER = 6
+        #: Parameter code (B) of the CMU DC bias output, which is scaled by 1/1000
+        DC_BIAS_OUTPUT_PARAMETER = 9
+        #: Parameter codes (B) of resistance and reactance
+        IMPEDANCE_PARAMETERS = (12, 13)
+        #: Parameter codes (B) of conductance and susceptance
+        ADMITTANCE_PARAMETERS = (14, 15)
+        #: Channel numbers (F) reporting extraneous or invalid data
+        MISC_CHANNELS = (26, 31)
+        #: Range code (C) marking invalid data
+        INVALID_RANGE = 31
+        #: Status codes (E) which are a code of their own instead of a sum of status values
+        DISCRETE_STATUS = (5,)
+
+        # status of the measurement data (E), Table 1-15. Same bit assignment as the
+        # status of the ASCII formats, but without 64/128 and with the additional
+        # discrete code 5. The status of source data instead marks the sweep step.
+        smu_status = {
+            1: (
+                "Measurement data is over the measurement range. Or the sweep "
+                "measurement was aborted by the automatic stop function or power "
+                "compliance. D is meaningless."
+            ),
+            2: (
+                "One or more channels are oscillating. Or source output did not "
+                "settle before measurement."
+            ),
+            4: "Another channel reached its compliance setting.",
+            5: "SMU is in the force saturation condition.",
+            8: "This channel reached its compliance setting.",
+            16: (
+                "Linear/Binary search measurement: Target value was not found "
+                "within the search range. Returns source output value. "
+                "Quasi-pulsed spot measurement: "
+                "The detection time was over the limit."
+            ),
+            32: (
+                "Linear/Binary search measurement: The search measurement was "
+                "stopped. Returns source output value. "
+                "Quasi-pulsed spot measurement: Output slew rate was too slow to "
+                "perform the settling detection. "
+                "Or quasi-pulsed source channel reached compliance before the "
+                "source output voltage changed 10 V from the start voltage."
+            ),
+        }
+        cmu_status = {
+            1: "Measurement data is over the measurement range. D is meaningless.",
+            2: "CMU is in the NULL loop unbalance condition.",
+            4: "CMU is in the IV amplifier saturation condition.",
+        }
+
+        #: Data names of the measurement data, by parameter code (B)
+        parameter_names = {
+            0: "Voltage Measurement (V)",
+            1: "Current Measurement (A)",
+            2: "Capacitance (F)",
+            TIME_PARAMETER: "Time (s)",
+            SAMPLING_INDEX_PARAMETER: "Sampling index",
+            7: "Frequency (Hz)",
+            8: "AC Level Output (V)",
+            DC_BIAS_OUTPUT_PARAMETER: "DC Bias Output (V)",
+            10: "AC Level Monitor (V)",
+            11: "DC Bias Monitor (V)",
+            12: "Resistance (Ohm)",
+            13: "Reactance (Ohm)",
+            14: "Conductance (S)",
+            15: "Susceptance (S)",
+            16: "QSCV Leakage Current Average (A)",
+            17: "QSCV Voltage V0 (V)",
+            18: "QSCV Voltage V (V)",
+            19: "QSCV Leakage Current IL0 (A)",
+            20: "QSCV Leakage Current IL (A)",
+            21: "QSCV Charge Current (A)",
+            22: "QSCV Voltage Average (V)",
+            23: "QSCV Sink Current Setup (A)",
+        }
+        #: Data names of the source output data, by parameter code (B)
+        source_names = {0: "Voltage Output (V)", 1: "Current Output (A)"}
+
+        _ranges_voltage = {
+            8: 0.5,
+            9: 5.0,
+            10: 0.2,
+            11: 2.0,
+            12: 20.0,
+            13: 40.0,
+            14: 100.0,
+            15: 200.0,
+            16: 500.0,
+            17: 1500.0,
+            18: 3000.0,
+            19: 10e3,
+        }
+        _ranges_current = {
+            **{code: 10.0 ** (code - 20) for code in range(8, 21)},
+            21: 2.0,
+            22: 20.0,
+            23: 40.0,
+            26: 500.0,
+            28: 2000.0,
+        }
+        _ranges_capacitance = {code: 10.0 ** (code - 20) for code in range(8, 21)}
+        _ranges_ac_level = {4: 16e-3, 5: 32e-3, 6: 64e-3, 7: 125e-3, 8: 250e-3}
+        _ranges_dc_bias = {3: 8.0, 4: 12.0, 5: 25.0, 7: 100.0}
+        _ranges_frequency = {3: 1e3, 4: 10e3, 5: 100e3, 6: 1e6}
+
+        #: Range (C) lookup table of every parameter code (B) whose value is scaled by a range
+        ranges = {
+            0: _ranges_voltage,
+            1: _ranges_current,
+            2: _ranges_capacitance,
+            7: _ranges_frequency,
+            8: _ranges_ac_level,
+            10: _ranges_ac_level,
+            11: _ranges_dc_bias,
+            16: _ranges_current,
+            17: _ranges_voltage,
+            18: _ranges_voltage,
+            19: _ranges_current,
+            20: _ranges_current,
+            21: _ranges_current,
+            22: _ranges_voltage,
+            23: _ranges_current,
+        }
+
+        def __init__(self, unit_names: dict[int, str]):
+            super().__init__(unit_names, "FMT14")
+
+        def check_status(
+            self, status_string: str, name: str | None = None, cmu: bool = False
+        ) -> None:
+            """Check returned status of instrument.
+
+            :param status_string: Status byte returned by the instrument, as decimal digits
+            :param name: Name of the SMU channel, defaults to None
+            :param cmu: Whether or not channel is CMU, defaults to False (SMU)
+            """
+            status = int(status_string)
+            if status in self.DISCRETE_STATUS:
+                # 5 (force saturation) is a status code of its own and must not be
+                # decomposed into the status values 1 and 4
+                log.info(
+                    "Agilent B1500%s: %s",
+                    "" if name is None else f" {name}",
+                    self.smu_status[status],
+                )
+                return
+            super().check_status(status_string, name=name, cmu=cmu)
+
+        def format_single(self, element: str | bytes) -> tuple[str, str | int, str, float]:
+            """Format single measurement value.
+
+            :param element: Single 8 byte measurement value read from the instrument
+            :return: Status (decimal digits, empty for time data), channel, data name, value
+            """
+            element = cast(bytes, element)
+            if len(element) != self.size:
+                raise ValueError(
+                    f"Binary data element has {len(element)} instead of {self.size} bytes."
+                )
+            measurement = bool(element[0] & 0x80)  # A: type
+            parameter = element[0] & 0x7F  # B: parameter
+            channel_number = element[7] & 0x1F  # F: channel number
+            try:
+                data_name = self.parameter_names[parameter]
+            except KeyError:
+                raise ValueError(f"Unknown parameter code {parameter} in binary data.") from None
+            if not measurement:
+                data_name = self.source_names.get(parameter, data_name)
+
+            if parameter == self.TIME_PARAMETER:
+                # H: time data count, 6 bytes replacing range, data count and status.
+                # Time data carries no status, independent of the type bit, which some
+                # instruments set even though the guide describes it as source data.
+                count = int.from_bytes(element[1:7], "big", signed=True)
+                status = ""
+                value = float("nan") if count == -(2**47) else count / 1e6
+                check_status = False
+            else:
+                range_code = element[1]  # C: range
+                count = int.from_bytes(element[2:6], "big", signed=True)  # D: data count
+                status = str(element[6])  # E: status
+                value = self.calculate_value(parameter, range_code, count)
+                # the status of source data indicates the sweep step instead of an error
+                check_status = measurement
+
+            if channel_number in self.MISC_CHANNELS:
+                channel: str | int = "MISC"
+            else:
+                # channel numbers above 10 address subchannel 2, not relevant for SMU/CMU
+                slot = channel_number if channel_number <= 10 else channel_number - 10
+                channel = self.resolve_channel(slot, status, check_status=check_status)
+
+            return (status, channel, data_name, value)
+
+        def calculate_value(self, parameter: int, range_code: int, count: int) -> float:
+            """Calculate a measurement or output value from its binary data elements.
+
+            :param parameter: Parameter code (B) defining the kind of data
+            :param range_code: Range code (C) the value was measured or output with
+            :param count: Data count (D)
+            :return: Value in SI units, ``NaN`` if the range is invalid
+            """
+            if parameter == self.DC_BIAS_OUTPUT_PARAMETER:
+                return count / 1000
+            if parameter == self.SAMPLING_INDEX_PARAMETER:
+                return count
+            if range_code == self.INVALID_RANGE:
+                return float("nan")
+            if parameter in self.IMPEDANCE_PARAMETERS + self.ADMITTANCE_PARAMETERS:
+                # the range of the CMU measurement data is the exponent of the range
+                # value in Ohm. It is signed, so that the instrument can also report
+                # ranges below the 1 Ohm of the range table.
+                exponent = range_code - 256 if range_code > 127 else range_code
+                if parameter in self.IMPEDANCE_PARAMETERS:
+                    return count * 10.0**exponent / 2**24
+                return count / (2**24 * 10.0**exponent)
+            range_value = self.ranges[parameter].get(range_code)
+            if range_value is None:
+                log.info("Agilent B1500: unknown range %s for parameter %s", range_code, parameter)
+                return float("nan")
+            return count * range_value / 1e6
 
     def _data_formatting(
         self, output_format_str: str, unit_names: dict[int, str] | None = None
@@ -572,6 +826,7 @@ class AgilentB1500(SCPIMixin, Instrument):
         classes: dict[str, type[AgilentB1500._data_formatting_generic]] = {
             "FMT1": self._data_formatting_FMT1,
             "FMT11": self._data_formatting_FMT11,
+            "FMT14": self._data_formatting_FMT14,
             "FMT21": self._data_formatting_FMT21,
         }
         try:
@@ -591,13 +846,17 @@ class AgilentB1500(SCPIMixin, Instrument):
         Should be called once per session to set the data format for
         interpreting the measurement values read from the instrument.
 
-        Currently implemented are format 1, 11, and 21.
+        Currently implemented are the ASCII formats 1, 11 and 21 as well as the
+        8 byte binary format 14. Binary data is transferred faster and with a
+        higher resolution, but the ``IMP`` command
+        (:meth:`CMU.set_measurement_mode`) is not effective for it, so the MFCMU
+        always returns resistance and reactance or conductance and susceptance.
 
         :param output_format: Output format string, e.g. ``11``
         :param mode: Data output mode, defaults to 0 (only measurement data is returned)
         """
         # restrict to implemented formats
-        output_format = strict_discrete_set(output_format, [1, 11, 21])
+        output_format = strict_discrete_set(output_format, [1, 11, 14, 21])
         # possible: [1, 2, 3, 4, 5, 11, 12, 13, 14, 15, 21, 22, 25]
         mode = strict_range(mode, range(11))
         self.write(f"FMT {output_format}, {mode}")
@@ -895,18 +1154,33 @@ class AgilentB1500(SCPIMixin, Instrument):
     # Read out of data
     ######################################
 
+    number_of_data: InstrumentProperty[int] = Instrument.measurement(
+        "NUB?",
+        """Get the number of measurement data in the output data buffer. (``NUB?``)""",
+        cast=int,
+    )
+
     def read_data(self, number_of_points: int) -> pd.DataFrame:
         """Read all data from buffer and return Pandas DataFrame.
 
         Specify number of measurement points for correct splitting of the data list.
+
+        Binary data is not terminated by a character, so the number of values in the
+        buffer is queried first (:meth:`number_of_data`) to read the exact number of
+        bytes. Wait for the measurement to be finished (:meth:`check_idle`) before
+        calling this method, otherwise not all data is in the buffer yet.
 
         :param number_of_points: Number of measurement points
         :return: Measurement Data
         """
         if self._data_format is None:
             raise ValueError("No data format set. Call data_format() before reading data.")
-        data_list = self.read().split(",")
-        data_array = np.array(data_list)
+        if self._data_format.binary:
+            data_bytes = self.read_bytes(self._data_format.size * self.number_of_data)
+            data_list = self._split_binary(data_bytes)
+        else:
+            data_list = self.read().split(",")
+        data_array = np.array(data_list, dtype=object)
         data_array_list = np.split(data_array, number_of_points)
         data = pd.DataFrame(data=data_array_list)
         data_mapped = data.map(self._data_format.format_single)
@@ -918,6 +1192,20 @@ class AgilentB1500(SCPIMixin, Instrument):
         data_twice_mapped.columns = first_row
         return data_twice_mapped
 
+    def _split_binary(self, data: bytes) -> list[bytes]:
+        """Split a binary response into its fixed size measurement values.
+
+        :param data: Binary response read from the instrument
+        :return: List of single measurement values
+        """
+        size = cast("AgilentB1500._data_formatting_generic", self._data_format).size
+        if len(data) % size:
+            raise ValueError(
+                f"Read {len(data)} bytes, which is not a multiple of the "
+                f"{size} byte binary data elements."
+            )
+        return [data[index : index + size] for index in range(0, len(data), size)]
+
     def read_channels(self, nchannels: int) -> tuple[tuple[str, str | int, str, float], ...]:
         """Read data for 1 measurement point from the buffer for the specified number of channels.
 
@@ -927,14 +1215,15 @@ class AgilentB1500(SCPIMixin, Instrument):
         """
         if self._data_format is None:
             raise ValueError("No data format set. Call data_format() before reading data.")
-        data = self.read_bytes(self._data_format.size * nchannels)
-        data = data.decode("ASCII")
-        data = data.rstrip("\r,")
-        # ',' if more data in buffer, '\r' if last data point
-        data = data.split(",")
-        data = map(self._data_format.format_single, data)
-        data = tuple(data)
-        return data
+        raw = self.read_bytes(self._data_format.size * nchannels)
+        if self._data_format.binary:
+            elements: list[str] | list[bytes] = self._split_binary(raw)
+        else:
+            text = raw.decode("ASCII")
+            text = text.rstrip("\r,")
+            # ',' if more data in buffer, '\r' if last data point
+            elements = text.split(",")
+        return tuple(self._data_format.format_single(element) for element in elements)
 
     ######################################
     # Queries on all SMUs
@@ -997,19 +1286,27 @@ TimedSpotCMUMonitor = namedtuple(
 )
 
 
-def _spot_measurement(unit: SMU | CMU, cmd: str) -> tuple[float, ...]:
+def _spot_measurement(unit: SMU | CMU, cmd: str, values: int | None = None) -> tuple[float, ...]:
     """Write a high speed spot measurement command and parse the response.
 
     :param unit: SMU or CMU issuing the measurement
     :param cmd: Complete spot measurement command including parameters
+    :param values: Number of values the instrument returns. Only relevant for binary
+        data formats, where it allows to read exactly the expected number of bytes
+        instead of emptying the read buffer.
     :return: Measurement values in the order returned by the instrument
     """
     data_format = unit.parent._data_format
     if data_format is None:
         raise ValueError("No data format set. Call data_format() before measuring.")
     unit.write(cmd)
-    response = unit.read()
-    return tuple(data_format.format_single(element)[3] for element in response.split(","))
+    elements: list[str] | list[bytes]
+    if data_format.binary:
+        count = -1 if values is None else data_format.size * values
+        elements = unit.parent._split_binary(unit.parent.read_bytes(count))
+    else:
+        elements = unit.read().split(",")
+    return tuple(data_format.format_single(element)[3] for element in elements)
 
 
 class SMU(Channel):
@@ -1363,7 +1660,7 @@ class SMU(Channel):
         cmd = "TTI {ch}" if timestamp else "TI {ch}"
         if meas_range is not None:
             cmd += f", {self.current_ranging.meas(meas_range).index}"
-        values = _spot_measurement(self, cmd)
+        values = _spot_measurement(self, cmd, 2 if timestamp else 1)
         return TimedSpotCurrent(*values) if timestamp else values[0]
 
     def measure_voltage(
@@ -1385,7 +1682,7 @@ class SMU(Channel):
         cmd = "TTV {ch}" if timestamp else "TV {ch}"
         if meas_range is not None:
             cmd += f", {self.voltage_ranging.meas(meas_range).index}"
-        values = _spot_measurement(self, cmd)
+        values = _spot_measurement(self, cmd, 2 if timestamp else 1)
         return TimedSpotVoltage(*values) if timestamp else values[0]
 
     def measure_iv(
@@ -1425,7 +1722,7 @@ class SMU(Channel):
                 f", {self.current_ranging.meas(current_range).index}"
                 f", {self.voltage_ranging.meas(voltage_range).index}"
             )
-        values = _spot_measurement(self, cmd)
+        values = _spot_measurement(self, cmd, 3 if timestamp else 2)
         return TimedSpotIV(*values) if timestamp else SpotIV(*values)
 
     ######################################
@@ -2089,10 +2386,25 @@ class CMU(Channel):
         else:
             meas_range = strict_discrete_set(meas_range, self.MEASUREMENT_RANGES)
             cmd += f", 2, {meas_range}"  # fixed range
-        values = _spot_measurement(self, cmd)
+        values = _spot_measurement(self, cmd, self._number_of_values(timestamp))
         if timestamp:
             return TimedSpotCMUMonitor(*values) if len(values) == 5 else TimedSpotCMU(*values)
         return SpotCMUMonitor(*values) if len(values) == 4 else SpotCMU(*values)
+
+    def _number_of_values(self, timestamp: bool) -> int | None:
+        """Return the number of values a spot measurement returns, for binary data formats.
+
+        Determining it requires querying :attr:`voltage_monitor_enabled`, which is
+        only worth an additional command for binary formats, where the number of
+        bytes to read has to be known in advance.
+
+        :param timestamp: Whether the time data is returned as well
+        :return: Number of values, or None if the data format is not binary
+        """
+        data_format = self.parent._data_format
+        if data_format is None or not data_format.binary:
+            return None
+        return (4 if self.voltage_monitor_enabled else 2) + int(timestamp)
 
     def set_cv_timings(
         self,

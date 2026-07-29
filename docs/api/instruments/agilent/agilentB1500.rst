@@ -56,6 +56,7 @@ Command         Property/Method
 ``MSC``         :meth:`~AgilentB1500.sampling_auto_abort`
 ``MT``          :meth:`~AgilentB1500.sampling_timing`
 ``MV``          :meth:`SMU.sampling_source` mode: ``'VOLTAGE'``
+``NUB?``        :attr:`~AgilentB1500.number_of_data`
 ``*OPC?``       :meth:`~AgilentB1500.check_idle`
 ``PA``          :meth:`~AgilentB1500.pause`
 ``PAD``         :attr:`~AgilentB1500.parallel_meas`
@@ -76,6 +77,23 @@ Command         Property/Method
 ``WV``          :meth:`SMU.staircase_sweep_source` mode: ``'VOLTAGE'``
 ``XE``          :meth:`~AgilentB1500.send_trigger`
 ===========     =============================================
+
+Data Output Format
+==================
+:meth:`~AgilentB1500.data_format` supports the ASCII formats ``1``, ``11`` and
+``21`` as well as the 8 byte binary format ``14``.
+Binary data is transferred faster and with a higher resolution, but comes with
+two restrictions:
+
+* The ``IMP`` command (:meth:`CMU.set_measurement_mode`) is not effective, so the
+  MFCMU always returns resistance and reactance or conductance and susceptance.
+* The response is terminated by ``EOI`` only, without a termination character, so
+  the number of values to read has to be known in advance.
+  :meth:`~AgilentB1500.read_data` therefore queries
+  :attr:`~AgilentB1500.number_of_data` (``NUB?``) first, which requires the
+  measurement to be finished (:meth:`~AgilentB1500.check_idle`).
+  :meth:`~AgilentB1500.read_channels` is unaffected, as the number of channels is
+  passed to it anyway.
 
 **********************************************
 Examples

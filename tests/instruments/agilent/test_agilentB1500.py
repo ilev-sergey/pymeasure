@@ -22,6 +22,8 @@
 # THE SOFTWARE.
 #
 
+import math
+
 import pytest
 
 from pymeasure.instruments.agilent import AgilentB1500
@@ -113,6 +115,279 @@ class AgilentB1500Mock(AgilentB1500):
         self.add_child(SPGU, id=1, collection="spgus", prefix="spgu")
         self.add_child(CMU, id=2, collection="cmu", prefix=None)
         self.add_child(SMU, id=1, collection="smus", prefix="smu", smu_type="HRSMU", slot=3)
+
+
+def binary_element(parameter, range_code, count, measurement=True, status=0, channel=1):
+    """Build a single 8 byte FMT14 data element.
+
+    :param parameter: Parameter code (B) defining the kind of data
+    :param range_code: Range code (C) the value was measured or output with
+    :param count: Data count (D)
+    :param measurement: Type (A), False for source output data
+    :param status: Status (E)
+    :param channel: Channel number (F)
+    """
+    return (
+        bytes([(int(measurement) << 7) | parameter, range_code])
+        + count.to_bytes(4, "big", signed=True)
+        + bytes([status, channel])
+    )
+
+
+def binary_time_element(count, channel=1):
+    """Build a single 8 byte FMT14 time data element with time count (H) ``count``."""
+    return bytes([3]) + count.to_bytes(6, "big", signed=True) + bytes([channel])
+
+
+class TestBinaryDataFormat:
+    """Tests for the 8 byte binary FMT14 data format."""
+
+    #: Formatting of a B1500 with an SMU in slot 1 and a CMU in slot 2, as
+    #: assumed by the examples of the programming guide
+    formatting = AgilentB1500._data_formatting_FMT14({1: "SMU1", 2: "CMU"})
+
+    def test_data_format(self):
+        """Test that data_format selects the binary formatting."""
+        with expected_protocol(
+            AgilentB1500Mock,
+            [("FMT 14, 0", None), ("ERRX?", '+0,"No Error."')],
+        ) as inst:
+            inst.data_format(14)
+            assert inst._data_format.format == "FMT14"
+            assert inst._data_format.binary is True
+            assert inst._data_format.size == 8
+
+    @pytest.mark.parametrize(
+        "element, expected",
+        [
+            # examples of the programming guide, section "8 Bytes Data Elements"
+            (bytes.fromhex("810b000186a00001"), ("0", "SMU1", "Current Measurement (A)", 100e-12)),
+            (bytes.fromhex("030000000186a001"), ("", "SMU1", "Time (s)", 0.1)),
+            # negative data counts are two's complements
+            (binary_element(1, 11, -100000), ("0", "SMU1", "Current Measurement (A)", -100e-12)),
+            # voltage of the 2 V range, source data has no error status
+            (
+                binary_element(0, 11, 2000000, measurement=False, status=1),
+                ("1", "SMU1", "Voltage Output (V)", 4.0),
+            ),
+            # CMU data of the 10 kOhm range is scaled by 2**24 instead of 1e6
+            (binary_element(12, 4, 2**24, channel=2), ("0", "CMU", "Resistance (Ohm)", 10e3)),
+            (binary_element(14, 4, 2**24, channel=2), ("0", "CMU", "Conductance (S)", 100e-6)),
+            # the CMU DC bias output is scaled by 1e3 regardless of the range
+            (
+                binary_element(9, 0, 1500, measurement=False, channel=2),
+                ("0", "CMU", "DC Bias Output (V)", 1.5),
+            ),
+            # the sampling index is the data count itself
+            (binary_element(6, 0, 7, measurement=False), ("0", "SMU1", "Sampling index", 7)),
+            # channel numbers above 10 address subchannel 2 of the same slot
+            (
+                binary_element(1, 11, 100000, channel=11),
+                ("0", "SMU1", "Current Measurement (A)", 100e-12),
+            ),
+            (binary_time_element(100000, channel=26), ("", "MISC", "Time (s)", 0.1)),
+        ],
+    )
+    def test_format_single(self, element, expected):
+        """Test formatting of single binary measurement values."""
+        assert self.formatting.format_single(element) == expected
+
+    @pytest.mark.parametrize(
+        "element",
+        [
+            binary_element(1, 31, 100000),  # range code 31: invalid data
+            binary_time_element(-(2**47)),  # smallest time count: invalid data
+        ],
+    )
+    def test_format_single_invalid_data(self, element):
+        """Test that invalid measurement values are returned as NaN."""
+        assert math.isnan(self.formatting.format_single(element)[3])
+
+    def test_format_single_instrument_response(self):
+        """Test formatting of a ``TTC`` response of a B1500 with a CMU in slot 8.
+
+        The CMU reports the range of the measurement data as a signed exponent
+        (252 is -4), and marks the time data as measurement data even though the
+        programming guide describes it as source data.
+        """
+        formatting = AgilentB1500._data_formatting_FMT14({8: "CMU"})
+        response = bytes.fromhex(
+            "83 00000d11b946 08"  # time
+            "8e fc fcd2e6ad 00 48"  # conductance
+            "8f fc fa473433 00 48"  # susceptance
+            "8a 04 000000ea 00 48"  # AC level monitor
+            "8b 03 000002bb 00 48"  # DC bias monitor
+        )
+        values = [
+            formatting.format_single(response[index : index + 8])
+            for index in range(0, len(response), 8)
+        ]
+        assert [(value[1], value[2]) for value in values] == [
+            ("CMU", "Time (s)"),
+            ("CMU", "Conductance (S)"),
+            ("CMU", "Susceptance (S)"),
+            ("CMU", "AC Level Monitor (V)"),
+            ("CMU", "DC Bias Monitor (V)"),
+        ]
+        assert values[0][3] == pytest.approx(219.26535)
+        assert values[3][3] == pytest.approx(3.744e-6)
+        assert values[4][3] == pytest.approx(5.592e-3)
+
+    def test_status_sum(self, caplog):
+        """Test that a status which is a sum of status values logs all of them."""
+        # 12 is the sum of 4 (another channel in compliance) and 8 (this channel)
+        with caplog.at_level("INFO"):
+            self.formatting.format_single(binary_element(1, 11, 100000, status=12))
+        assert "Another channel reached its compliance setting." in caplog.text
+        assert "This channel reached its compliance setting." in caplog.text
+
+    def test_status_discrete_code(self, caplog):
+        """Test that the force saturation status is not decomposed into 1 and 4."""
+        with caplog.at_level("INFO"):
+            self.formatting.format_single(binary_element(1, 11, 100000, status=5))
+        assert "force saturation" in caplog.text
+        assert "over the measurement range" not in caplog.text
+
+    def test_status_of_source_data(self, caplog):
+        """Test that the sweep step status of source data is not logged as an error."""
+        with caplog.at_level("INFO"):
+            self.formatting.format_single(
+                binary_element(0, 11, 2000000, measurement=False, status=2)
+            )
+        assert caplog.text == ""
+
+    def test_format_single_unknown_parameter(self):
+        """Test that an unassigned parameter code is rejected."""
+        with pytest.raises(ValueError, match="parameter code 4"):
+            self.formatting.format_single(binary_element(4, 0, 0))
+
+    def test_format_single_wrong_size(self):
+        """Test that an element of the wrong size is rejected."""
+        with pytest.raises(ValueError, match="instead of 8 bytes"):
+            self.formatting.format_single(binary_element(1, 11, 100000)[:-1])
+
+    def test_read_channels(self):
+        """Test read_channels with binary data."""
+        response = binary_element(1, 11, 100000, channel=3) + binary_element(
+            0, 11, 2000000, channel=3
+        )
+        with expected_protocol(
+            AgilentB1500Mock,
+            [
+                ("FMT 14, 0", None),
+                ("ERRX?", '+0,"No Error."'),
+                (None, response),
+            ],
+        ) as inst:
+            inst.data_format(14)
+            assert inst.read_channels(2) == (
+                ("0", "SMU1", "Current Measurement (A)", 100e-12),
+                ("0", "SMU1", "Voltage Measurement (V)", 4.0),
+            )
+
+    def test_read_data(self):
+        """Test that read_data queries the number of values before reading them."""
+        response = b"".join(
+            binary_element(1, 11, 100000 * point, channel=3)
+            + binary_element(0, 11, 2000000 * point, measurement=False, channel=3)
+            for point in (1, 2)
+        )
+        with expected_protocol(
+            AgilentB1500Mock,
+            [
+                ("FMT 14, 0", None),
+                ("ERRX?", '+0,"No Error."'),
+                ("NUB?", "4"),
+                (None, response),
+            ],
+        ) as inst:
+            inst.data_format(14)
+            data = inst.read_data(2)
+            assert list(data.columns) == [
+                "SMU1 Current Measurement (A)",
+                "SMU1 Voltage Output (V)",
+            ]
+            assert data["SMU1 Current Measurement (A)"].tolist() == [100e-12, 200e-12]
+            assert data["SMU1 Voltage Output (V)"].tolist() == [4.0, 8.0]
+
+    def test_read_data_incomplete(self):
+        """Test that a response which is no multiple of the element size is rejected."""
+        with expected_protocol(
+            AgilentB1500Mock,
+            [
+                ("FMT 14, 0", None),
+                ("ERRX?", '+0,"No Error."'),
+                ("NUB?", "1"),
+                (None, binary_element(1, 11, 100000, channel=3)[:-1]),
+            ],
+        ) as inst:
+            inst.data_format(14)
+            with pytest.raises(ValueError, match="not a multiple"):
+                inst.read_data(1)
+
+    def test_measure_current(self):
+        """Test that a spot measurement reads the expected number of bytes."""
+        current = binary_element(1, 11, 100000, channel=3)
+        with expected_protocol(
+            AgilentB1500Mock,
+            [
+                ("FMT 14, 0", None),
+                ("ERRX?", '+0,"No Error."'),
+                ("TI 3", current),
+                ("TTI 3", binary_time_element(123000, channel=3) + current),
+            ],
+        ) as inst:
+            inst.data_format(14)
+            assert inst.smu1.measure_current() == 100e-12
+            assert inst.smu1.measure_current(timestamp=True) == (0.123, 100e-12)
+
+    @pytest.mark.parametrize("monitor", [True, False])
+    def test_cmu_measure(self, monitor):
+        """Test that a spot C measurement accounts for the voltage monitor values."""
+        response = binary_element(12, 4, 2**24, channel=2) + binary_element(13, 4, 2**24, channel=2)
+        if monitor:
+            # AC level monitor of the 16 mV range and DC bias monitor of the 25 V range
+            response += binary_element(10, 4, 1875000, channel=2) + binary_element(
+                11, 5, 40000, channel=2
+            )
+        with expected_protocol(
+            AgilentB1500Mock,
+            [
+                ("FMT 14, 0", None),
+                ("ERRX?", '+0,"No Error."'),
+                ("*LRN? 71", f"LMN{int(monitor)}"),
+                ("TC 2, 0", response),
+            ],
+        ) as inst:
+            inst.data_format(14)
+            result = inst.cmu.measure()
+            if monitor:
+                assert isinstance(result, SpotCMUMonitor)
+                assert result == (10e3, 10e3, 0.03, 1.0)
+            else:
+                assert isinstance(result, SpotCMU)
+                assert result == (10e3, 10e3)
+
+
+class TestCheckStatus:
+    """Tests for the numeric status decomposition of the ASCII formats."""
+
+    formatting = AgilentB1500._data_formatting_FMT21({1: "SMU1"})
+
+    def test_status_sum(self, caplog):
+        """Test that a status which is a sum of status values logs all of them."""
+        # 6 is the sum of 2 (oscillation) and 4 (another unit in compliance)
+        with caplog.at_level("INFO"):
+            self.formatting.check_status("006", name="SMU1")
+        assert "Oscillation of force or saturation current." in caplog.text
+        assert "Another unit reached its compliance setting." in caplog.text
+        assert "A/D converter overflowed." not in caplog.text
+
+    def test_status_unassigned_value(self, caplog):
+        """Test that a status value which is not assigned for CMUs is reported."""
+        with caplog.at_level("INFO"):
+            self.formatting.check_status("008", name="CMU", cmu=True)
+        assert "check_status not possible" in caplog.text
 
 
 class TestSMU:
