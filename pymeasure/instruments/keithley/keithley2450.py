@@ -799,9 +799,12 @@ class Keithley2450(KeithleyBufferBase, SCPIMixin, Instrument):
             """
             return ", ".join(f"{v:.3g}" for v in values)
 
+        # The source list commands accept at most this many values each, the rest is appended.
+        max_values_per_command = 100
         self.write(":SOUR:FUNC VOLT")
-        if n_points > 100:
-            chunks = np.array_split(waveform, int(np.ceil(n_points / 100)))
+        if n_points > max_values_per_command:
+            n_chunks = int(np.ceil(n_points / max_values_per_command))
+            chunks = np.array_split(waveform, n_chunks)
             self.write(f":SOUR:LIST:VOLT {fmt(chunks[0])}")
             for chunk in chunks[1:]:
                 self.write(f":SOUR:LIST:VOLT:APP {fmt(chunk)}")
