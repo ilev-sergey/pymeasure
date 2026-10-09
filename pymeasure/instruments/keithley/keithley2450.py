@@ -31,6 +31,7 @@ import numpy as np
 
 from pymeasure.instruments import Instrument, SCPIMixin
 from pymeasure.instruments.common_base import InstrumentProperty, identity
+from pymeasure.instruments.instrument import AdapterType
 from pymeasure.instruments.validators import (
     strict_discrete_set,
     strict_range,
@@ -44,7 +45,7 @@ log = logging.getLogger(__name__)
 log.addHandler(logging.NullHandler())
 
 
-def _validated_sweep_delay(delay: float, allow_auto: bool) -> float:
+def _validate_sweep_delay(delay: float, allow_auto: bool) -> float:
     """Validate a sweep delay in seconds against the values the instrument accepts.
 
     :param delay: Delay in seconds, either 0 for no delay, a value from 50e-6 to 10000,
@@ -90,7 +91,7 @@ class Keithley2450(KeithleyBufferBase, SCPIMixin, Instrument):
 
     """
 
-    def __init__(self, adapter, name: str = "Keithley 2450 SourceMeter", **kwargs):
+    def __init__(self, adapter: AdapterType, name: str = "Keithley 2450 SourceMeter", **kwargs):
         super().__init__(
             adapter,
             name,
@@ -381,8 +382,8 @@ class Keithley2450(KeithleyBufferBase, SCPIMixin, Instrument):
     current_autozero: InstrumentProperty[bool] = Instrument.control(
         ":SENS:CURR:AZER?",
         ":SENS:CURR:AZER %d",
-        """ Control (bool) whether the internal reference measurements (auto-zero) are
-        updated automatically for current measurements. Valid values are True and False. """,
+        """ Control whether the internal reference measurements (auto-zero) are
+        updated automatically for current measurements (bool). """,
         values={True: 1, False: 0},
         map_values=True,
     )
@@ -390,8 +391,8 @@ class Keithley2450(KeithleyBufferBase, SCPIMixin, Instrument):
     current_autorange: InstrumentProperty[bool] = Instrument.control(
         ":SENS:CURR:RANG:AUTO?",
         ":SENS:CURR:RANG:AUTO %d",
-        """ Control (bool) whether the current measurement range is selected
-        automatically. When set to True the instrument picks the optimal range. """,
+        """ Control whether the current measurement range is selected
+        automatically, letting the instrument pick the optimal range (bool). """,
         values={True: 1, False: 0},
         map_values=True,
     )
@@ -399,9 +400,9 @@ class Keithley2450(KeithleyBufferBase, SCPIMixin, Instrument):
     sense_count = Instrument.control(
         ":SENS:COUNT?",
         ":SENS:COUNT %d",
-        """ Control (integer) the number of measurements made per trigger,
-        from 1 to 300 000. """,
-        validator=truncated_range,
+        """ Control the number of measurements made per trigger
+        (int strictly from 1 to 300 000). """,
+        validator=strict_range,
         values=[1, 300000],
         cast=int,
     )
@@ -413,8 +414,8 @@ class Keithley2450(KeithleyBufferBase, SCPIMixin, Instrument):
     source_voltage_readback: InstrumentProperty[bool] = Instrument.control(
         ":SOUR:VOLT:READ:BACK?",
         ":SOUR:VOLT:READ:BACK %d",
-        """ Control (bool) whether the source voltage is measured and returned as the
-        source reading, instead of the programmed value. Valid values are True and False. """,
+        """ Control whether the source voltage is measured and returned as the
+        source reading, instead of the programmed value (bool). """,
         values={True: 1, False: 0},
         map_values=True,
     )
@@ -758,7 +759,7 @@ class Keithley2450(KeithleyBufferBase, SCPIMixin, Instrument):
         n_steps = strict_range(n_steps, [2, 1000000])
         count = strict_range(count, [0, 268435455])
         range_type = strict_discrete_set(range_type, ["AUTO", "BEST", "FIXED"])
-        delay = _validated_sweep_delay(delay, allow_auto=True)
+        delay = _validate_sweep_delay(delay, allow_auto=True)
         self.write(
             f":SOUR:SWE:VOLT:LIN {v_from}, {v_to}, {n_steps}, {delay}, {count}, "
             f"{range_type}, {'ON' if fail_abort else 'OFF'}, {'ON' if dual else 'OFF'}, "
@@ -782,15 +783,12 @@ class Keithley2450(KeithleyBufferBase, SCPIMixin, Instrument):
                       0 for no delay or a value from 50e-6 to 10000
         :raises ValueError: If any argument lies outside the accepted values
         """
-        n_points = len(waveform)
-        if not 1 <= n_points <= 2500:
-            raise ValueError(
-                f"A voltage list sweep takes 1 to 2500 points, but {n_points} were given."
-            )
-        for voltage in waveform:
-            strict_range(voltage, [-210, 210])
+        waveform = np.asarray(waveform, dtype=float)
+        n_points = strict_range(len(waveform), [1, 2500])
+        if not np.all(np.abs(waveform) <= 210):
+            raise ValueError("Voltage list sweep values must be in range [-210,210].")
         n_times = strict_range(n_times, [0, 268435455])
-        delay = _validated_sweep_delay(delay, allow_auto=False)
+        delay = _validate_sweep_delay(delay, allow_auto=False)
 
         def fmt(values: Iterable[float]) -> str:
             """Format a sequence of voltages as a comma-separated command argument.
@@ -802,7 +800,7 @@ class Keithley2450(KeithleyBufferBase, SCPIMixin, Instrument):
 
         self.write(":SOUR:FUNC VOLT")
         if n_points > 100:
-            chunks = np.array_split(np.array(waveform), int(np.ceil(n_points / 100)))
+            chunks = np.array_split(waveform, int(np.ceil(n_points / 100)))
             self.write(f":SOUR:LIST:VOLT {fmt(chunks[0])}")
             for chunk in chunks[1:]:
                 self.write(f":SOUR:LIST:VOLT:APP {fmt(chunk)}")

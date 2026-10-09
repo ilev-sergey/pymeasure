@@ -36,7 +36,7 @@ log.addHandler(logging.NullHandler())
 
 
 class KeithleyBufferBase:
-    """Implement the subset of buffer capability that is available in :class:`Keithley2450`."""
+    """Implement the basic buffer controls shared by Keithley instruments."""
 
     buffer_points = Instrument.control(
         ":TRAC:POIN?", ":TRAC:POIN %d",
