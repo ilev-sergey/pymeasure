@@ -89,7 +89,7 @@ class TestChuck:
              ("ReadChuckIndex Y", "0:100 200"),
              ]
         ) as inst:
-            inst.chuck.index = (100, 200)
+            inst.chuck.index = (100., 200)
             assert [100, 200] == inst.chuck.index
 
 
@@ -140,11 +140,13 @@ class TestVelox:
             _ = inst.id
 
     def test_expected_error(self):
-        with does_not_raise(ConnectionError), expected_protocol(
-            Velox,
-            [("StepNextDie", "703: End of wafer.")]
-        ) as inst:
+        with (
+            does_not_raise(ConnectionError),
+            expected_protocol(Velox, [("StepNextDie", "703: End of wafer.")]) as inst,
+        ):
             inst.wafermap.step_next_die()
+            assert inst.error_code == 703
+            assert inst.error_message == "End of wafer."
 
     def test_options(self):
         with pytest.raises(NotImplementedError), expected_protocol(

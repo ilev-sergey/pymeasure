@@ -31,7 +31,7 @@ from typing import Literal
 
 import numpy as np
 
-from pymeasure.instruments import Instrument
+from pymeasure.instruments import IEEE4882Mixin, Instrument
 from pymeasure.instruments.common_base import InstrumentProperty
 from pymeasure.instruments.validators import (
     strict_discrete_set,
@@ -67,7 +67,7 @@ class ERRStatus(IntFlag):
     MATH_ERR = 128
 
 
-class SR830(Instrument):
+class SR830(IEEE4882Mixin, Instrument):
     SAMPLE_FREQUENCIES: list[float] = [
         62.5e-3, 125e-3, 250e-3, 500e-3, 1, 2, 4, 8, 16,
         32, 64, 128, 256, 512
@@ -111,27 +111,6 @@ class SR830(Instrument):
         "CH1",
         "CH2",
     ]
-
-    status = Instrument.measurement(
-        "*STB?",
-        """Get the status byte and Master Summary Status bit.""",
-        cast=str,
-    )
-
-    id = Instrument.measurement(
-        "*IDN?",
-        """Get the identification of the instrument.""",
-        cast=str,
-        maxsplit=0,
-    )
-
-    def clear(self):
-        """Clear the instrument status byte."""
-        self.write("*CLS")
-
-    def reset(self):
-        """Reset the instrument."""
-        self.write("*RST")
 
     sine_voltage = Instrument.control(
         "SLVL?", "SLVL%0.3f",
@@ -339,7 +318,7 @@ class SR830(Instrument):
     )
 
     aux_out_1 = Instrument.control(
-        "AUXV?1;", "AUXV1,%f;",
+        "AUXV?1;", "AUXV1,%g;",
         """ A floating point property that controls the output of Aux output 1 in
         Volts, taking values between -10.5 V and +10.5 V.
         This property can be set.""",
@@ -350,7 +329,7 @@ class SR830(Instrument):
     dac1 = aux_out_1
 
     aux_out_2 = Instrument.control(
-        "AUXV?2;", "AUXV2,%f;",
+        "AUXV?2;", "AUXV2,%g;",
         """ A floating point property that controls the output of Aux output 2 in
         Volts, taking values between -10.5 V and +10.5 V.
         This property can be set.""",
@@ -361,7 +340,7 @@ class SR830(Instrument):
     dac2 = aux_out_2
 
     aux_out_3 = Instrument.control(
-        "AUXV?3;", "AUXV3,%f;",
+        "AUXV?3;", "AUXV3,%g;",
         """ A floating point property that controls the output of Aux output 3 in
         Volts, taking values between -10.5 V and +10.5 V.
         This property can be set.""",
@@ -372,7 +351,7 @@ class SR830(Instrument):
     dac3 = aux_out_3
 
     aux_out_4 = Instrument.control(
-        "AUXV?4;", "AUXV4,%f;",
+        "AUXV?4;", "AUXV4,%g;",
         """ A floating point property that controls the output of Aux output 4 in
         Volts, taking values between -10.5 V and +10.5 V.
         This property can be set.""",

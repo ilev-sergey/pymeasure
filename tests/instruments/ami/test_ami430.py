@@ -22,8 +22,41 @@
 # THE SOFTWARE.
 #
 
-from .channel import Channel
-from .common_base import IdType, InstrumentProperty, cast_or_str, identity
-from .generic_types import IEEE4882Mixin, SCPIMixin, SCPIUnknownMixin
-from .instrument import AdapterType, Instrument
-from .resources import find_serial_port, list_resources
+from pymeasure.instruments.ami.ami430 import AMI430
+from pymeasure.test import expected_protocol
+
+# AMI430.__init__ reads (and discards) two welcome/connect message lines
+# before any other communication; their content is irrelevant here.
+INIT = [(None, b"welcome1"), (None, b"welcome2")]
+
+
+def test_has_persistent_switch_enabled_true():
+    with expected_protocol(
+            AMI430,
+            INIT + [(b"PSwitch?", b"1")],
+    ) as instr:
+        assert instr.has_persistent_switch_enabled() is True
+
+
+def test_has_persistent_switch_enabled_false():
+    with expected_protocol(
+            AMI430,
+            INIT + [(b"PSwitch?", b"0")],
+    ) as instr:
+        assert instr.has_persistent_switch_enabled() is False
+
+
+def test_enable_persistent_switch():
+    with expected_protocol(
+            AMI430,
+            INIT + [(b"PSwitch 1", None)],
+    ) as instr:
+        instr.enable_persistent_switch()
+
+
+def test_disable_persistent_switch():
+    with expected_protocol(
+            AMI430,
+            INIT + [(b"PSwitch 0", None)],
+    ) as instr:
+        instr.disable_persistent_switch()

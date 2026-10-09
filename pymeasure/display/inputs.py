@@ -24,6 +24,7 @@
 
 import logging
 import re
+from typing import cast
 
 from .Qt import QtGui, QtWidgets
 
@@ -172,7 +173,11 @@ class ListInput(Input, QtWidgets.QComboBox):
             else:
                 suffix = ""
 
-            self._stringChoices = tuple((str(choice) + suffix) for choice in parameter.choices)
+            self._stringChoices = (
+                tuple((str(choice) + suffix) for choice in parameter.choices)
+                if parameter.choices is not None
+                else ()
+            )
         except TypeError:  # choices is None
             self._stringChoices = ()
         self.clear()
@@ -265,6 +270,14 @@ class ScientificInput(Input, QtWidgets.QDoubleSpinBox):
         string = self.toString(value).replace("e+", "e")
         string = re.sub(r"e(-?)0*(\d+)", r"e\1\2", string)
         return string
+
+    def stepBy(self, steps):
+        value = self.value()
+        if self._parameter.step_type == "log":
+            sign = 1 if value >= 0 else -1
+            self.setValue(value * cast(float, self._parameter.step) ** (sign * steps))
+        else:
+            super().stepBy(steps)
 
     def stepEnabled(self):
         if self.parameter.step:
