@@ -797,7 +797,7 @@ class Keithley2450(KeithleyBufferBase, SCPIMixin, Instrument):
             :param values: A sequence of voltage values in Volts
             :returns: The values as a comma-separated string
             """
-            return ", ".join(f"{v:.3g}" for v in values)
+            return ", ".join(f"{v:g}" for v in values)
 
         # The source list commands accept at most this many values each, the rest is appended.
         max_values_per_command = 100
