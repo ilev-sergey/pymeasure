@@ -33,6 +33,7 @@ from pymeasure.instruments import Instrument, SCPIMixin
 from pymeasure.instruments.common_base import InstrumentProperty, identity
 from pymeasure.instruments.instrument import AdapterType
 from pymeasure.instruments.validators import (
+    strict_discrete_range,
     strict_discrete_set,
     strict_range,
     truncated_range,
@@ -756,8 +757,8 @@ class Keithley2450(KeithleyBufferBase, SCPIMixin, Instrument):
         """
         v_from = strict_range(v_from, [-210, 210])
         v_to = strict_range(v_to, [-210, 210])
-        n_steps = strict_range(n_steps, [2, 1000000])
-        count = strict_range(count, [0, 268435455])
+        n_steps = int(strict_discrete_range(n_steps, [2, 1000000], 1))
+        count = int(strict_discrete_range(count, [0, 268435455], 1))
         range_type = strict_discrete_set(range_type, ["AUTO", "BEST", "FIXED"])
         delay = _validate_sweep_delay(delay, allow_auto=True)
         self.write(
@@ -787,7 +788,7 @@ class Keithley2450(KeithleyBufferBase, SCPIMixin, Instrument):
         n_points = strict_range(len(waveform), [1, 2500])
         if not np.all(np.abs(waveform) <= 210):
             raise ValueError("Voltage list sweep values must be in range [-210,210].")
-        n_times = strict_range(n_times, [0, 268435455])
+        n_times = int(strict_discrete_range(n_times, [0, 268435455], 1))
         delay = _validate_sweep_delay(delay, allow_auto=False)
 
         def fmt(values: Iterable[float]) -> str:
